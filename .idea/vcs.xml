@@ -1,0 +1,12 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<project version="4">
+  <component name="VcsDirectoryMappings">
+    <mapping directory="" vcs="Git" />
+    <mapping directory="$PROJECT_DIR$/algorithms/mapf-research/MAPF-LNS" vcs="Git" />
+    <mapping directory="$PROJECT_DIR$/algorithms/rl-training/stable-baselines3" vcs="Git" />
+    <mapping directory="$PROJECT_DIR$/backend/core-service/fleet_adapter" vcs="Git" />
+    <mapping directory="$PROJECT_DIR$/backend/core-service/openrmf" vcs="Git" />
+    <mapping directory="$PROJECT_DIR$/frontend/src/libs/react-three-fiber" vcs="Git" />
+    <mapping directory="$PROJECT_DIR$/frontend/src/libs/three.js" vcs="Git" />
+  </component>
+</project>
