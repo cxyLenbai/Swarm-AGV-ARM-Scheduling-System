@@ -6,9 +6,9 @@
 |------|------|
 | 项目名称 | 蜂群 (Swarm) 生产级实时调度与任务分配系统 |
 | 文档类型 | 技术栈选型文档 |
-| 文档版本 | 2.0.0 - 生产级方案 |
+| 文档版本 | 2.1.0 - 生产级方案（新增拥堵热点预测与预警） |
 | 创建日期 | 2025-12-08 |
-| 最后更新 | 2025-12-08 |
+| 最后更新 | 2025-12-14 |
 
 ## 1. 生产级技术选型原则
 
@@ -17,6 +17,7 @@
 - **极致性能**: 调度响应时间 <50ms
 - **3D数字孪生**: 高保真实时仿真可视化
 - **高可用性**: 99.99%系统可用性
+- **预测预警闭环**: 仓内拥堵热点预测、预警与调度联动处置
 - **开源优先**: 优先选择成熟开源方案，降低成本和风险
 
 ### 1.2 架构设计原则
@@ -197,6 +198,31 @@
   ✅ 纯PyTorch实现
   ✅ 丰富的数据处理工具
   ✅ 活跃的社区支持
+```
+
+### 3.3 仓内拥堵热点预测与预警（时空预测）
+```yaml
+目标:
+  - 预测未来1/5/15分钟区域/路段拥堵风险
+  - 输出热点热力图与预警事件，联动调度引擎绕行/限流/重分配
+
+在线数据链路:
+  - 数据采集: Kafka（机器人状态/任务流/路权占用）
+  - 特征计算: Flink（窗口聚合、CEP、异常检测）
+  - 在线特征存储: Redis（热点）+ InfluxDB（时序）
+  - 拓扑与区域: PostgreSQL（PostGIS扩展）+ Neo4j
+  - 推理服务: FastAPI + Ray Serve（在线推理、灰度/回滚）
+
+模型选择:
+  - ST-GNN: DGL/PyG + PyTorch（图拓扑 + 时序建模）
+  - 备选: ConvLSTM / Temporal Fusion Transformer（按数据量与实时性取舍）
+
+MLOps建议:
+  - MLflow: 实验追踪、模型注册与版本管理
+  - Feast: 特征定义与离线/在线一致性
+
+可观测与告警:
+  - Prometheus + Grafana + AlertManager（推理延迟、吞吐、误报率、模型漂移）
 ```
 
 ## 4. 3D数字孪生可视化技术栈
@@ -1560,7 +1586,9 @@ CI/CD流水线:
 调度引擎: OpenRMF + FLEET (开源基础)
 路径规划: MAPF-LNS + OMPL (学术算法)
 AI决策: Ray RLlib + DGL (分布式AI)
-数据存储: PostgreSQL + Redis + InfluxDB + Neo4j (多类型)
+拥堵预测: Flink + DGL/PyTorch + FastAPI/Ray Serve (热点预测与在线推理)
+MLOps: MLflow + Feast (模型与特征管理)
+数据存储: PostgreSQL(PostGIS) + Redis + InfluxDB + Neo4j (多类型)
 消息队列: Kafka + Flink (流处理)
 容器化: Kubernetes + Istio (云原生)
 监控: Prometheus + Grafana + ELK (可观测性)

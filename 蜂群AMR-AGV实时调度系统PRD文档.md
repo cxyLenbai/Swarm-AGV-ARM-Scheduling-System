@@ -5,10 +5,10 @@
 | 字段 | 描述 |
 |------|------|
 | 项目名称 | 蜂群 (Swarm) 实时调度与任务分配系统 |
-| 版本号 | V1.0 - 核心调度与实时分配 |
-| 文档版本 | 1.0.0 |
+| 版本号 | V1.1 - 核心调度 + 仓内拥堵热点预测与预警 |
+| 文档版本 | 1.1.0 |
 | 创建日期 | 2025-12-08 |
-| 最后更新 | 2025-12-08 |
+| 最后更新 | 2025-12-14 |
 | 目标用户 | 大型电商/物流中心、智能工厂、第三方物流(3PL)仓库的运营管理人员、现场工程师 |
 
 ## 1. 项目概述
@@ -32,6 +32,7 @@
 - **GNN** (Graph Neural Network): 图神经网络
 - **数字孪生**: 物理系统的实时数字化表示
 - **AIOps**: 智能运维，基于AI的运维自动化
+- **拥堵热点**: 在特定时间窗口内，仓内区域/路段出现持续高密度、低速或排队的拥堵高风险位置集合
 
 ## 2. 功能需求
 
@@ -163,6 +164,37 @@
 - 充电路径优化
 - 充电桩资源分配
 - 应急充电机制
+
+#### 2.2.4 仓内拥堵热点预测与预警 (F-12) - 极高优先级
+**功能描述**: 基于实时轨迹、任务流、路网拓扑与历史行为数据，预测未来1/5/15分钟内仓内区域/路段拥堵风险，生成热点热力图与预警，并向调度引擎提供可执行的绕行/限流/重分配建议，形成“预测-预警-处置-复盘”闭环。
+
+**预测目标**:
+- 区域级拥堵指数（0-1）与风险评分（risk_score）
+- 路段/路口排队长度、平均速度、等待时间的短期预测
+- 拥堵传播方向与可能波及范围（可选）
+
+**输入数据**:
+- 机器人位置/速度/加速度、停滞时间、路径占用与通行权信息
+- 任务队列（发单强度、任务类型分布、站点服务时间）
+- 仓内拓扑（区域划分、路段容量、路口冲突规则）与动态管制策略
+- 历史拥堵标签、人工处置记录、仿真回放数据（用于训练与校准）
+
+**输出与联动**:
+- 热点热力图：按区域/路段输出风险分布，用于数字孪生叠加展示
+- 预警事件：包含时间窗、位置、等级、置信度、影响范围与建议处置策略
+- 调度建议：动态调整路段成本/禁行、入口限流、任务重分配、区域潮汐迁移
+- 处置闭环：支持人工确认/一键执行/回滚，并记录执行效果用于模型迭代
+
+**预警分级**:
+- L1（提示）：轻度风险，建议绕行或提前分流
+- L2（预警）：中度风险，建议限流 + 动态路径成本调整
+- L3（告警）：高风险/已拥堵，建议区域封控、任务重分配与WMS节流联动
+
+**性能与效果指标**:
+- 数据到达→热点指数计算延迟 < 1s（P95）
+- 预测刷新周期 ≤ 5s（在线推理/滚动预测）
+- 预警提前量 ≥ 3min（对L2/L3拥堵事件）
+- 预警准确率（Precision）≥ 80%（在可配置召回目标下）
 
 ### 2.3 数据接口与系统集成模块
 
@@ -323,6 +355,26 @@ Path {
   actual_time: int,
   conflicts: Conflict[]
 }
+
+-- 区域/路段实体（用于拥堵聚合与可视化）
+Zone {
+  id: string,
+  name: string,
+  type: "area" | "edge" | "junction",
+  geometry: JSON
+}
+
+-- 拥堵预警事件
+CongestionAlert {
+  id: string,
+  level: "L1" | "L2" | "L3",
+  horizon_seconds: int,
+  zone_id: string,
+  risk_score: float,
+  confidence: float,
+  suggested_actions: JSON,
+  created_at: datetime
+}
 ```
 
 ### 6.2 时序数据模型
@@ -338,6 +390,17 @@ RobotStatusTimeSeries {
   battery_level: float,
   temperature: float,
   vibration: float
+}
+
+-- 区域/路段拥堵时序数据
+ZoneCongestionTimeSeries {
+  timestamp: datetime,
+  zone_id: string,
+  congestion_index: float,
+  avg_speed: float,
+  queue_length: float,
+  risk_score: float,
+  confidence: float
 }
 ```
 
@@ -371,8 +434,19 @@ Response:
 # 实时状态推送接口 (WebSocket)
 WS /api/v1/realtime/status
 Message:
-  type: "robot_status" | "task_update" | "system_alert"
+  type: "robot_status" | "task_update" | "system_alert" | "congestion_alert" | "congestion_heatmap_update"
   data: object
+
+# 拥堵热点查询接口
+GET /api/v1/congestion/hotspots?horizon_seconds=300
+Response:
+  generated_at: datetime
+  horizon_seconds: int
+  hotspots:
+    - zone_id: string
+      risk_score: float
+      confidence: float
+      congestion_index: float
 ```
 
 ### 7.2 设备控制接口
@@ -439,6 +513,7 @@ Response:
 | AI算法性能不达标 | 高 | 中 | 多算法并行验证，建立算法评估体系 |
 | 高并发性能瓶颈 | 高 | 中 | 架构设计充分考虑扩展性，提前压测 |
 | 异构设备兼容性 | 中 | 高 | 建立标准化适配层，充分测试 |
+| 拥堵预测误报/漏报导致调度震荡 | 中 | 中 | 引入置信度与抑制策略（冷却时间/迟滞），支持灰度与人工确认，持续监控模型漂移并定期回训 |
 
 ### 11.2 业务风险
 | 风险 | 影响 | 概率 | 应对策略 |
@@ -453,6 +528,7 @@ Response:
 - 系统可用性 > 99.99%
 - 任务分配成功率 > 99.5%
 - 路径冲突解决成功率 > 99.9%
+- 拥堵预警提前量 ≥ 3min（L2/L3），预警准确率（Precision）≥ 80%（可配置召回目标）
 
 ### 12.2 业务指标
 - 仓库作业效率提升 ≥ 20%
