@@ -675,9 +675,21 @@ Gin: https://github.com/gin-gonic/gin
 
 #### 4.6.2.2 GraphQL - 灵活数据查询
 ```yaml
-项目地址: https://github.com/graphql/graphql-js
+规范: https://spec.graphql.org/
+Go实现: https://github.com/99designs/gqlgen
 
 优势:
+  ✅ 按需数据获取
+  ✅ 强类型系统
+  ✅ 单一端点
+  ✅ 实时订阅支持 (Subscriptions)
+
+使用场景:
+  - 复杂数据关系查询
+  - 移动端/多端聚合查询
+  - 实时数据订阅
+```
+
 ### 4.6.10 后端服务架构分工
 
 #### 4.6.10.1 服务职责划分
@@ -777,23 +789,15 @@ Go服务优化:
   - 零拷贝网络I/O
   - 编译优化
 ```
-  ✅ 按需数据获取
-  ✅ 强类型系统
-  ✅ 单一端点
-  ✅ 实时订阅支持
-
-使用场景:
-  - 复杂数据关系查询
-  - 移动端API优化
-  - 实时数据订阅
-```
 
 ### 4.6.3 认证和授权
 
 #### 4.6.3.1 JSON Web Token (JWT) - 令牌认证
 ```yaml
 标准: RFC 7519
-库: jsonwebtoken (Node.js), PyJWT (Python)
+库:
+  Go: github.com/golang-jwt/jwt/v5
+  Python: PyJWT
 
 实现方案:
   ✅ 无状态认证
@@ -808,42 +812,44 @@ Go服务优化:
   - 令牌黑名单
 ```
 
-#### 4.6.3.2 Passport.js - 认证中间件
+#### 4.6.3.2 Go OIDC/JWT Middleware - 认证中间件
 ```yaml
-项目地址: https://github.com/jaredhanson/passport
-开发者: Jared Hanson
+项目地址:
+  - https://github.com/coreos/go-oidc
+  - https://pkg.go.dev/golang.org/x/oauth2
+  - https://github.com/golang-jwt/jwt
 
-功能特性:
-  ✅ 500+认证策略支持
-  ✅ 模块化架构
-  ✅ 简单集成
-  ✅ 会话管理
+核心能力:
+  ✅ 标准OIDC/OAuth2登录（对接Keycloak/企业SSO）
+  ✅ JWT验签与JWKS自动轮转（缓存+定时刷新）
+  ✅ RBAC/多租户：按Realm/Client/Role做细粒度鉴权
+  ✅ Gin中间件化接入（统一鉴权、审计、限流与灰度）
 
-支持策略:
-  - Local Strategy: 本地认证
-  - JWT Strategy: JWT令牌
-  - OAuth2 Strategy: 第三方登录
-  - LDAP Strategy: 企业目录
+落地建议:
+  - 外部用户认证：Keycloak（OIDC）+ API网关统一校验
+  - 服务间认证：mTLS + 短期JWT（可选）+ 最小权限
+  - 权限模型：角色(RBAC) + 资源策略（按仓库/区域/设备组）
 ```
 
 ### 4.6.4 数据验证和序列化
 
-#### 4.6.4.1 Joi - 数据验证 (Node.js)
+#### 4.6.4.1 go-playground/validator - 数据验证 (Go)
 ```yaml
-项目地址: https://github.com/sideway/joi
-开发者: Sideway Inc.
+项目地址: https://github.com/go-playground/validator
 
-功能特性:
-  ✅ 强大的验证规则
-  ✅ 自定义验证器
-  ✅ 错误消息定制
-  ✅ 异步验证支持
+核心优势:
+  ✅ 基于结构体Tag的声明式校验（与Gin/JSON绑定天然契合）
+  ✅ 高性能、低开销（适合高QPS API）
+  ✅ 可自定义校验规则与错误消息
 
 验证场景:
-  - API请求参数
-  - 配置文件验证
-  - 用户输入验证
-  - 数据库模型验证
+  - API请求参数（Query/Body/Header）校验
+  - 配置结构体校验（启动期Fail Fast）
+  - 业务规则校验（如任务约束、设备能力边界）
+
+集成建议:
+  - Gin binding + validator：统一请求校验与错误返回格式
+  - OpenAPI Schema：与请求结构体保持一致（减少文档漂移）
 ```
 
 #### 4.6.4.2 Pydantic - 数据验证 (Python)
@@ -859,53 +865,43 @@ Go服务优化:
 
 ### 4.6.5 ORM和数据库访问
 
-#### 4.6.5.1 Prisma - 现代ORM (Node.js)
+#### 4.6.5.1 GORM - 主要ORM (Go)
 ```yaml
-项目地址: https://github.com/prisma/prisma
-开发者: Prisma团队
+项目地址: https://github.com/go-gorm/gorm
 
 核心优势:
-  ✅ 类型安全的数据库访问
-  ✅ 自动生成客户端
-  ✅ 数据库迁移管理
-  ✅ 优秀的开发体验
-  ✅ 多数据库支持
+  ✅ Go生态最主流ORM之一，社区成熟
+  ✅ 支持事务、预加载、Hook、软删除、乐观锁等常用能力
+  ✅ 便于快速迭代业务API（后台管理/配置类场景）
 
-功能特性:
-  - Prisma Schema建模
-  - 自动类型生成
-  - 查询优化
-  - 连接池管理
-  - 实时数据同步
+使用建议:
+  - 读多写少/复杂报表：优先写原生SQL（避免ORM性能陷阱）
+  - 性能关键链路：配合sqlc/手写SQL做精细化优化
 ```
 
-#### 4.6.5.2 TypeORM - 备选ORM方案
+#### 4.6.5.2 sqlc - SQL优先代码生成 (Go)
 ```yaml
-项目地址: https://github.com/typeorm/typeorm
+项目地址: https://github.com/sqlc-dev/sqlc
 
-特点:
-  ✅ 装饰器语法
-  ✅ Active Record模式
-  ✅ 迁移和种子数据
-  ✅ 关系映射
+核心优势:
+  ✅ SQL作为唯一真相源（类型安全+可读性强）
+  ✅ 性能可控（接近手写SQL）
+  ✅ 适合核心调度/报表聚合等高性能路径
 ```
 
-#### 4.6.5.3 SQLAlchemy - Python ORM
+#### 4.6.5.3 SQLBoiler - 备选ORM/代码生成 (Go)
 ```yaml
-项目地址: https://github.com/sqlalchemy/sqlalchemy
+项目地址: https://github.com/volatiletech/sqlboiler
 
 优势:
-  ✅ 成熟稳定的ORM
-  ✅ 灵活的查询构建
-  ✅ 高级关系映射
-  ✅ 连接池管理
+  ✅ 代码生成模型（强类型、少反射）
+  ✅ 适合数据访问层规范化与大型项目维护
 ```
 
 ### 4.6.6 缓存策略
 
 #### 4.6.6.1 Redis客户端库
 ```yaml
-Node.js: ioredis - https://github.com/luin/ioredis
 Python: redis-py - https://github.com/redis/redis-py
 Go: go-redis - https://github.com/redis/go-redis
 
@@ -919,23 +915,20 @@ Go: go-redis - https://github.com/redis/go-redis
 
 ### 4.6.7 任务队列
 
-#### 4.6.7.1 Bull Queue - 任务队列 (Node.js)
+#### 4.6.7.1 Asynq - 任务队列 (Go)
 ```yaml
-项目地址: https://github.com/OptimalBits/bull
-开发者: OptimalBits
+项目地址: https://github.com/hibiken/asynq
+开发者: Hibiken团队
 
 功能特性:
-  ✅ 基于Redis的任务队列
-  ✅ 任务优先级支持
-  ✅ 延迟任务调度
-  ✅ 失败重试机制
-  ✅ Web界面监控
+  ✅ 基于Redis的任务队列（与现有Redis栈一致）
+  ✅ 任务优先级/延迟任务/重试/死信队列
+  ✅ 可观测性与管理面板支持
 
 应用场景:
-  - 异步任务处理
-  - 定时任务调度
-  - 批量数据处理
-  - 邮件发送队列
+  - 异步任务处理（通知、日志归档、批处理）
+  - 定时/延迟任务（任务超时补偿、定期对账）
+  - 与Kafka解耦：Kafka做事件流，Asynq做本地可控任务执行
 ```
 
 #### 4.6.7.2 Celery - 分布式任务队列 (Python)
@@ -983,22 +976,18 @@ Go: go-redis - https://github.com/redis/go-redis
 
 ### 4.6.9 日志和监控
 
-#### 4.6.9.1 Winston - 日志库 (Node.js)
+#### 4.6.9.1 Zap - 结构化日志库 (Go)
 ```yaml
-项目地址: https://github.com/winstonjs/winston
+项目地址: https://github.com/uber-go/zap
 
-功能特性:
-  ✅ 多传输方式支持
-  ✅ 日志级别管理
-  ✅ 自定义格式化
-  ✅ 错误处理
-  ✅ 性能优化
+核心优势:
+  ✅ 高性能结构化日志（JSON输出，适配ELK/Loki）
+  ✅ 支持字段化上下文（trace_id、robot_id、task_id等）
+  ✅ 生产/开发配置分离（采样、级别、编码器）
 
-配置方案:
-  - 控制台输出
-  - 文件轮转存储
-  - 远程日志服务
-  - 结构化日志格式
+常用组合:
+  - 文件轮转: https://github.com/natefinch/lumberjack
+  - 链路追踪: OpenTelemetry TraceID注入日志字段
 ```
 
 #### 4.6.9.2 APM监控集成
@@ -1353,7 +1342,7 @@ CI/CD流水线:
 │  ┌─────────────┐ ┌─────────────┐ ┌─────────────┐ ┌─────────────┐ ┌─────────┐ │
 │  │  调度引擎   │ │  AI决策服务 │ │  路径规划   │ │  设备管理   │ │ 监控服务│ │
 │  │  OpenRMF    │ │ Ray RLlib   │ │ MAPF-LNS   │ │   FLEET     │ │Prometheus│ │
-│  │  Node.js    │ │  FastAPI    │ │   Go/Gin   │ │  Node.js    │ │  Go     │ │
+│  │  ROS2      │ │  FastAPI    │ │   Go/Gin   │ │  Go/Gin    │ │  Go     │ │
 │  └─────────────┘ └─────────────┘ └─────────────┘ └─────────────┘ └─────────┘ │
 ├─────────────────────────────────────────────────────────────────────────────┤
 │                        消息层 (Message Layer)                               │
