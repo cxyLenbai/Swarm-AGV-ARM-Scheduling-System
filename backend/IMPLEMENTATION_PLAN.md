@@ -293,13 +293,13 @@
 
 #### Sprint 1（12/30–01/12）：三服务骨架 + 全局规范 + 本地可跑
 - **服务可启动（本地可跑）**
-  - Go `api`：`backend/go/api/cmd/api/` 可启动（HTTP），启动日志打印 `service/env/port/version`
-  - Go `core`：`backend/go/core/cmd/core/` 可启动（HTTP），启动日志打印 `service/env/port/version`
-  - Python `services`：`backend/python/services/app/` 可启动（FastAPI/HTTP），启动日志打印 `service/env/port/version`
-  - 统一本地启动入口：提供 `backend/Makefile` + `backend/scripts/dev.ps1`（例如 `make dev-api|dev-core|dev-py` 或 `powershell -File backend/scripts/dev.ps1 -Target api|core|py`），默认使用 `ENV=dev`
+  - [x] Go `api`：`backend/go/api/cmd/api/` 可启动（HTTP），启动日志打印 `service/env/port/version`
+  - [x] Go `core`：`backend/go/core/cmd/core/` 可启动（HTTP），启动日志打印 `service/env/port/version`
+  - [x] Python `services`：`backend/python/services/app/` 可启动（FastAPI/HTTP），启动日志打印 `service/env/port/version`
+  - [x] 统一本地启动入口：提供 `backend/Makefile` + `backend/scripts/dev.ps1`（例如 `make dev-api|dev-core|dev-py` 或 `powershell -File backend/scripts/dev.ps1 -Target api|core|py`），默认使用 `ENV=dev`
 - **健康检查**
-  - 3 个服务都提供 `GET /healthz`：进程存活即 200（不做外部依赖探测）
-  - 3 个服务都提供 `GET /readyz`：至少完成“配置加载 + 配置校验”才 200；不满足则 503 + 统一错误响应
+  - [x] 3 个服务都提供 `GET /healthz`：进程存活即 200（不做外部依赖探测）
+  - [ ] 3 个服务都提供 `GET /readyz`：至少完成“配置加载 + 配置校验”才 200；不满足则 503 + 统一错误响应
 - **配置（env + file）骨架**
   - 配置来源优先级：`config file < env`；支持 `ENV=dev|staging|prod` 选择默认配置文件（可被 `CONFIG_PATH` 覆盖）
   - 统一最小配置键（3 服务对齐命名）：`ENV`、`SERVICE_NAME`、`HTTP_PORT`、`LOG_LEVEL`、`CONFIG_PATH`、`REQUEST_TIMEOUT_MS`
