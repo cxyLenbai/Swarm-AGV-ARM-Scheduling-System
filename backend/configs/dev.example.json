@@ -1,0 +1,7 @@
+{
+  "ENV": "dev",
+  "SERVICE_NAME": "api",
+  "HTTP_PORT": 8080,
+  "LOG_LEVEL": "info",
+  "REQUEST_TIMEOUT_MS": 30000
+}

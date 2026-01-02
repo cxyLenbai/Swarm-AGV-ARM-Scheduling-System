@@ -2,16 +2,20 @@ package main
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
-	"log"
+	"log/slog"
 	"net"
 	"net/http"
 	"os"
 	"os/signal"
 	"strconv"
+	"strings"
 	"syscall"
 	"time"
+
+	"swarm-agv-arm-scheduling-system/shared/config"
+	"swarm-agv-arm-scheduling-system/shared/httpx"
+	"swarm-agv-arm-scheduling-system/shared/logx"
 )
 
 type statusResponse struct {
@@ -22,37 +26,51 @@ type statusResponse struct {
 }
 
 func main() {
-	serviceName := envOrDefault("SERVICE_NAME", "api")
-	envName := os.Getenv("ENV")
-	version := os.Getenv("VERSION")
-
-	port, err := parsePort(envOrDefault("PORT", "8080"))
-	if err != nil {
-		log.Fatalf("配置错误：PORT=%q 无效：%v", os.Getenv("PORT"), err)
-	}
+	cfg, readyProblems := config.Load("api", 8080)
+	version := strings.TrimSpace(os.Getenv("VERSION"))
+	logger := logx.New(cfg.ServiceName, cfg.Env, version, cfg.LogLevel)
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, r *http.Request) {
-		writeJSON(w, http.StatusOK, statusResponse{
+		httpx.WriteJSON(w, http.StatusOK, statusResponse{
 			Status:  "ok",
-			Service: serviceName,
-			Env:     envName,
+			Service: cfg.ServiceName,
+			Env:     cfg.Env,
 			Version: version,
 		})
 	})
 	mux.HandleFunc("GET /readyz", func(w http.ResponseWriter, r *http.Request) {
-		writeJSON(w, http.StatusOK, statusResponse{
+		if len(readyProblems) > 0 {
+			httpx.WriteError(
+				w,
+				r,
+				http.StatusServiceUnavailable,
+				"FAILED_PRECONDITION",
+				"service not ready: invalid configuration",
+				map[string]any{"problems": readyProblems},
+			)
+			return
+		}
+		httpx.WriteJSON(w, http.StatusOK, statusResponse{
 			Status:  "ready",
-			Service: serviceName,
-			Env:     envName,
+			Service: cfg.ServiceName,
+			Env:     cfg.Env,
 			Version: version,
 		})
 	})
 
-	handler := withRequestLog(mux)
+	notFound := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		httpx.WriteError(w, r, http.StatusNotFound, "NOT_FOUND", "route not found", nil)
+	})
+
+	handler := httpx.WrapServeMux(mux, notFound)
+	handler = httpx.WithTimeout(cfg.RequestTimeout, handler)
+	handler = httpx.WithRequestID(handler)
+	handler = httpx.WithRecover(logger, handler)
+	handler = httpx.WithRequestLog(logger, httpx.RequestLogOptions{SkipPaths: map[string]bool{"/healthz": true}}, handler)
 
 	server := &http.Server{
-		Addr:              net.JoinHostPort("", strconv.Itoa(port)),
+		Addr:              net.JoinHostPort("", strconv.Itoa(cfg.HTTPPort)),
 		Handler:           handler,
 		ReadHeaderTimeout: 5 * time.Second,
 		ReadTimeout:       30 * time.Second,
@@ -62,7 +80,12 @@ func main() {
 
 	errCh := make(chan error, 1)
 	go func() {
-		log.Printf("启动服务：service=%s env=%s addr=%s,version =%s", serviceName, envName, server.Addr, version)
+		logger.Info(context.Background(), "service_start", "starting service",
+			slog.String("addr", server.Addr),
+			slog.Int("http_port", cfg.HTTPPort),
+			slog.String("log_level", cfg.LogLevel),
+			slog.Int("request_timeout_ms", cfg.RequestTimeoutMS),
+		)
 		errCh <- server.ListenAndServe()
 	}()
 
@@ -71,69 +94,24 @@ func main() {
 
 	select {
 	case sig := <-sigCh:
-		log.Printf("收到信号，准备退出：%s", sig.String())
+		logger.Info(context.Background(), "shutdown_signal", "received signal", slog.String("signal", sig.String()))
 	case err := <-errCh:
 		if !errors.Is(err, http.ErrServerClosed) {
-			log.Fatalf("服务启动失败：%v", err)
+			logger.Error(context.Background(), "server_failed", "server failed",
+				slog.String("error_code", "INTERNAL_ERROR"),
+				slog.String("error", err.Error()),
+			)
+			os.Exit(1)
 		}
 	}
 
 	shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 	if err := server.Shutdown(shutdownCtx); err != nil {
-		log.Printf("退出失败：%v", err)
-	}
-	log.Printf("服务已退出：%s", serviceName)
-}
-
-func envOrDefault(key, defaultValue string) string {
-	if v := os.Getenv(key); v != "" {
-		return v
-	}
-	return defaultValue
-}
-
-func parsePort(raw string) (int, error) {
-	p, err := strconv.Atoi(raw)
-	if err != nil {
-		return 0, err
-	}
-	if p <= 0 || p > 65535 {
-		return 0, errors.New("端口范围应为 1-65535")
-	}
-	return p, nil
-}
-
-func writeJSON(w http.ResponseWriter, statusCode int, v any) {
-	w.Header().Set("Content-Type", "application/json; charset=utf-8")
-	w.WriteHeader(statusCode)
-	_ = json.NewEncoder(w).Encode(v)
-}
-
-func withRequestLog(next http.Handler) http.Handler {
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		start := time.Now()
-		lrw := &loggingResponseWriter{ResponseWriter: w, statusCode: http.StatusOK}
-
-		next.ServeHTTP(lrw, r)
-
-		duration := time.Since(start)
-		log.Printf("http_request method=%s path=%s status=%d duration_ms=%d remote=%s",
-			r.Method,
-			r.URL.Path,
-			lrw.statusCode,
-			duration.Milliseconds(),
-			r.RemoteAddr,
+		logger.Error(context.Background(), "shutdown_failed", "shutdown failed",
+			slog.String("error_code", "INTERNAL_ERROR"),
+			slog.String("error", err.Error()),
 		)
-	})
-}
-
-type loggingResponseWriter struct {
-	http.ResponseWriter
-	statusCode int
-}
-
-func (w *loggingResponseWriter) WriteHeader(statusCode int) {
-	w.statusCode = statusCode
-	w.ResponseWriter.WriteHeader(statusCode)
+	}
+	logger.Info(context.Background(), "service_stop", "service stopped")
 }

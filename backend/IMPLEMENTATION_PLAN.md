@@ -299,21 +299,21 @@
   - [x] 统一本地启动入口：提供 `backend/Makefile` + `backend/scripts/dev.ps1`（例如 `make dev-api|dev-core|dev-py` 或 `powershell -File backend/scripts/dev.ps1 -Target api|core|py`），默认使用 `ENV=dev`
 - **健康检查**
   - [x] 3 个服务都提供 `GET /healthz`：进程存活即 200（不做外部依赖探测）
-  - [ ] 3 个服务都提供 `GET /readyz`：至少完成“配置加载 + 配置校验”才 200；不满足则 503 + 统一错误响应
-- **配置（env + file）骨架**
+  - [x] 3 个服务都提供 `GET /readyz`：至少完成“配置加载 + 配置校验”才 200；不满足则 503 + 统一错误响应
+- [x] **配置（env + file）骨架**
   - 配置来源优先级：`config file < env`；支持 `ENV=dev|staging|prod` 选择默认配置文件（可被 `CONFIG_PATH` 覆盖）
   - 统一最小配置键（3 服务对齐命名）：`ENV`、`SERVICE_NAME`、`HTTP_PORT`、`LOG_LEVEL`、`CONFIG_PATH`、`REQUEST_TIMEOUT_MS`
   - 类型化配置模型 + 默认值策略：缺少必填配置时 `readyz` 不就绪（并返回稳定错误码）；敏感字段禁止明文落日志
   - 配置模板落地：`backend/configs/` 提供 `dev.example.*`（不提交密钥/口令）
-- **结构化日志字段定版（Go/Python 对齐，至少 JSON）**
+- [x] **结构化日志字段定版（Go/Python 对齐，至少 JSON）**
   - 必需字段：`ts`、`level`、`service`、`env`、`event`、`msg`、`request_id`（若是请求内日志）
   - HTTP 访问日志：`method`、`path`、`status_code`、`duration_ms`（`/healthz` 可降噪）
   - 错误字段：`error_code`、`error`（简要）、`stack`（prod 可裁剪/关闭）
-- **统一错误码/错误响应（Go/Python 对齐）**
+- [x] **统一错误码/错误响应（Go/Python 对齐）**
   - 错误码集合（最小可用）：`INVALID_ARGUMENT`、`NOT_FOUND`、`CONFLICT`、`UNAUTHENTICATED`、`FORBIDDEN`、`TIMEOUT`、`INTERNAL_ERROR`、`FAILED_PRECONDITION`
   - 统一错误响应体：`{"error":{"code":"...","message":"...","request_id":"...","details":{...}}}`
   - 必须覆盖：参数校验错误、路由不存在（404）、未知异常（500）、超时（504）
-- **基础中间件（先最小可用，后续 Sprint 再补齐 CORS/限流/Tracing）**
+- [x] **基础中间件（先最小可用，后续 Sprint 再补齐 CORS/限流/Tracing）**
   - RequestID：读取/生成 `X-Request-ID`，写回响应头；注入日志上下文；错误响应携带同一个 `request_id`
   - 请求日志：记录开始/结束与关键字段（见上）；可对健康检查降噪
   - 超时：按 `REQUEST_TIMEOUT_MS` 设置请求上限；超时返回 504 + `code=TIMEOUT` + 统一错误响应
@@ -322,9 +322,54 @@
   - 缺少关键配置时：`GET /readyz` 返回 503，且响应体/日志字段满足“统一错误响应 + request_id 可追踪”
 
 #### Sprint 2（01/13–01/26）：鉴权/多租户 + Postgres 事实来源
-- OIDC/JWT 验签（JWKS 缓存轮转）+ tenant 隔离中间件 + 审计日志最小版
-- Postgres 连接池 + migrations；核心表：`tenants/users/robots/tasks/task_events`
-- Repo 层最小实现（支撑后续设备/任务）
+- **目标**：把“谁能访问/访问哪个租户/访问行为可追溯/数据落到 Postgres”这 4 条安全与事实来源链路跑通，为 Sprint 3/4 的设备与任务闭环铺路。
+- [ ] **OIDC/JWT 鉴权（JWKS 缓存轮转）**
+  - 统一配置键（Go/Python 名称对齐）：`OIDC_ISSUER`、`OIDC_AUDIENCE`、`OIDC_JWKS_URL`（可选，默认 issuer/.well-known/jwks.json）、`JWKS_CACHE_TTL_SECONDS`、`JWT_CLOCK_SKEW_SECONDS`
+  - 统一鉴权策略：仅接受 `Authorization: Bearer <jwt>`；校验 `iss/aud/exp/nbf`；允许少量 clock skew；错误映射 `UNAUTHENTICATED`
+  - JWKS 缓存与轮转：按 `kid` 索引 key；命中失败时触发一次刷新；TTL 到期后台刷新（或下一次请求刷新）；网络失败时允许使用未过期缓存
+  - 产出：通用“鉴权结果上下文”结构（`subject/email/name/roles/claims` 等）+ 中间件（Go `api` 优先，Python 服务如需对外暴露也复用）
+- [ ] **Tenant 隔离中间件（强制租户边界）**
+  - 租户识别策略定版（建议最小可用）：请求头 `X-Tenant-ID`（或 `X-Tenant-Slug`）为主；JWT claims 中可选携带 `tenant_id/tenants` 做二次校验（header 与 token 不一致则 `FORBIDDEN`）
+  - 在请求上下文中注入 `tenant_id`，并要求所有 Repo 查询都必须带 `tenant_id` 过滤（禁止“无租户条件”的全表操作）
+  - 日志字段补齐：请求日志/错误日志统一带 `tenant_id`（如果解析到）
+  - 最小验证端点：`GET /api/v1/me`（返回用户 claims）+ `GET /api/v1/tenants/current`（返回当前 tenant）
+- [ ] **审计日志最小版（可追溯）**
+  - 审计事件范围（先最小可用）：登录/鉴权失败、写接口（POST/PUT/PATCH/DELETE）、关键资源（robots/tasks）读写
+  - 记录字段（建议）：`audit_id`、`occurred_at`、`tenant_id`、`actor_user_id`（可空）/`subject`、`action`、`resource_type/resource_id`（可空）、`request_id`、`method/path/status_code/duration_ms`、`client_ip/user_agent`、`details(jsonb)`
+  - 写入策略：请求结束后异步写入（失败只告警不影响主请求）；提供最小开关（例如 `AUDIT_ENABLED`）
+- [ ] **Postgres 连接池（服务可读写事实来源）**
+  - 统一配置键：`DATABASE_URL`、`DB_MAX_CONNS`、`DB_MIN_CONNS`、`DB_CONN_MAX_IDLE_SECONDS`、`DB_CONN_MAX_LIFETIME_SECONDS`
+  - 连接池封装（建议 `pgxpool`）：初始化/关闭钩子；`readyz` 增加 `SELECT 1` 探测（失败则 503）
+  - 迁移执行策略：本地/CI 启动前跑 migrations（或服务启动时可选自动迁移，默认关闭）
+- [ ] **Migrations（事实来源 Schema 定版）**
+  - 落点建议：`backend/migrations/`（按时间戳排序），并提供一条命令执行（`make migrate-up` / `backend/scripts/migrate.*`）
+  - 核心表（最小可用）
+    - `tenants`：`tenant_id`（uuid pk）、`slug`（unique）、`name`、`created_at`
+    - `users`：`user_id`（uuid pk）、`tenant_id`（fk）、`subject`（oidc sub）、`email`、`display_name`、`role`、`created_at`、`last_login_at`、唯一约束（`tenant_id, subject`）
+    - `robots`：`robot_id`（uuid pk）、`tenant_id`（fk）、`robot_code`（tenant 内 unique）、`display_name`、`status`（可选）、`updated_at`
+    - `tasks`：`task_id`（uuid pk）、`tenant_id`（fk）、`task_type`、`status`、`idempotency_key`（tenant 内 unique）、`payload`（jsonb）、`created_by_user_id`（可空）、`created_at`、`updated_at`
+    - `task_events`：`event_id`（uuid pk）、`tenant_id`（fk）、`task_id`（fk）、`event_type`、`from_status/to_status`（可空）、`occurred_at`、`actor_user_id`（可空）、`payload`（jsonb）；索引（`tenant_id, task_id, occurred_at`）
+    - `audit_logs`（若采纳审计表）：按上文字段定版并加索引（`tenant_id, occurred_at`、`request_id`）
+  - 约束要求：所有表必须有 `tenant_id`；FK on delete 策略定版（建议先 RESTRICT/NO ACTION，避免误删扩散）
+- [ ] **Repo 层最小实现（支撑后续设备/任务）**
+  - 仓储接口（按领域拆分）：`TenantsRepo/UsersRepo/RobotsRepo/TasksRepo/AuditRepo`（都以 `tenant_id` 为必传参数）
+  - 关键方法（最小集合）
+    - tenants：`CreateTenant`、`GetTenantByID/Slug`
+    - users：`UpsertUserFromOIDC`（`tenant_id + subject`）、`GetUserByID`
+    - robots：`UpsertRobot`、`GetRobotByCode`、`ListRobots`
+    - tasks：`CreateTask`（支持 `idempotency_key` 幂等返回）、`GetTaskByID`、`ListTasks`、`AppendTaskEvent`
+    - audit：`WriteAuditLog`（可批量）
+  - 事务边界：`CreateTask + AppendTaskEvent` 需同事务；并发幂等（唯一键冲突返回已有记录）
+- **待定决策 / 风险点（尽早拍板）**
+  - 租户定位：header（简单）vs 子域名/路径（更接近 SaaS）；建议先 header，后续可扩展
+  - token→角色映射：直接使用 `roles/scopes` claim 还是做 DB 侧用户角色（建议先 token 直出 + 预留 DB 覆盖）
+  - JWKS 可用性：外部网络抖动会导致验签失败；需要明确超时、重试与“仅使用未过期缓存”的降级策略
+  - 本地开发：提供 dev issuer/JWKS（或 mock 模式），避免每个开发者都依赖外部 IdP
+- **本 Sprint 验收**
+  - 非公开路由默认必须鉴权：无 token/无效 token 返回 401 + `UNAUTHENTICATED`（统一错误响应）
+  - 多租户隔离：跨 tenant 访问同一 `robot_code/task_id` 必须 404 或 403（策略明确且一致）；任何 Repo 都不允许“无 tenant 条件”查询
+  - `readyz` 同时校验配置 + DB 可用；migrations 可重复执行且不会破坏已有数据（幂等/版本控制）
+  - 审计日志（若开启）在写接口请求后可在 DB 查到对应记录，并带 `request_id/tenant_id/subject/status_code`
 
 #### Sprint 3（01/27–02/09）：设备接入 MVP（先让“数据”进来）
 - 设备注册/更新 API；状态上报（心跳/在线/位置/电量）
