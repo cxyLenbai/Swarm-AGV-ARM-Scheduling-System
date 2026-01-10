@@ -30,6 +30,12 @@ type Config struct {
 	OIDCJWKSURL      string
 	JWKSTTLSeconds   int
 	JWTClockSkewSec  int
+	DatabaseURL      string
+	DBMaxConns       int
+	DBMinConns       int
+	DBConnMaxIdleSec int
+	DBConnMaxLifeSec int
+	AuditEnabled     bool
 }
 
 func Load(serviceNameDefault string, httpPortDefault int) (Config, []Problem) {
@@ -46,6 +52,12 @@ func Load(serviceNameDefault string, httpPortDefault int) (Config, []Problem) {
 		OIDCJWKSURL:      strings.TrimSpace(os.Getenv("OIDC_JWKS_URL")),
 		JWKSTTLSeconds:   300,
 		JWTClockSkewSec:  60,
+		DatabaseURL:      strings.TrimSpace(os.Getenv("DATABASE_URL")),
+		DBMaxConns:       10,
+		DBMinConns:       1,
+		DBConnMaxIdleSec: 300,
+		DBConnMaxLifeSec: 1800,
+		AuditEnabled:     false,
 	}
 
 	problems := make([]Problem, 0, 4)
@@ -66,6 +78,11 @@ func Load(serviceNameDefault string, httpPortDefault int) (Config, []Problem) {
 	}
 
 	applyEnv(&cfg, &problems)
+
+	// If issuer is set and no explicit JWKS URL is provided, default to issuer/.well-known/jwks.json.
+	if cfg.OIDCIssuer != "" && strings.TrimSpace(cfg.OIDCJWKSURL) == "" {
+		cfg.OIDCJWKSURL = strings.TrimRight(cfg.OIDCIssuer, "/") + "/.well-known/jwks.json"
+	}
 
 	if cfg.Env == "" {
 		cfg.Env = "dev"
@@ -89,6 +106,26 @@ func Load(serviceNameDefault string, httpPortDefault int) (Config, []Problem) {
 	if cfg.JWTClockSkewSec < 0 {
 		problems = append(problems, Problem{Field: "JWT_CLOCK_SKEW_SECONDS", Message: "JWT_CLOCK_SKEW_SECONDS must be >= 0"})
 		cfg.JWTClockSkewSec = 60
+	}
+	if cfg.DBMaxConns <= 0 {
+		problems = append(problems, Problem{Field: "DB_MAX_CONNS", Message: "DB_MAX_CONNS must be > 0"})
+		cfg.DBMaxConns = 10
+	}
+	if cfg.DBMinConns < 0 {
+		problems = append(problems, Problem{Field: "DB_MIN_CONNS", Message: "DB_MIN_CONNS must be >= 0"})
+		cfg.DBMinConns = 1
+	}
+	if cfg.DBMinConns > cfg.DBMaxConns {
+		problems = append(problems, Problem{Field: "DB_MIN_CONNS", Message: "DB_MIN_CONNS must be <= DB_MAX_CONNS"})
+		cfg.DBMinConns = cfg.DBMaxConns
+	}
+	if cfg.DBConnMaxIdleSec <= 0 {
+		problems = append(problems, Problem{Field: "DB_CONN_MAX_IDLE_SECONDS", Message: "DB_CONN_MAX_IDLE_SECONDS must be > 0"})
+		cfg.DBConnMaxIdleSec = 300
+	}
+	if cfg.DBConnMaxLifeSec <= 0 {
+		problems = append(problems, Problem{Field: "DB_CONN_MAX_LIFETIME_SECONDS", Message: "DB_CONN_MAX_LIFETIME_SECONDS must be > 0"})
+		cfg.DBConnMaxLifeSec = 1800
 	}
 
 	return cfg, problems
@@ -194,6 +231,48 @@ func applyEnv(cfg *Config, problems *[]Problem) {
 			cfg.JWTClockSkewSec = sec
 		}
 	}
+	if v := strings.TrimSpace(os.Getenv("DATABASE_URL")); v != "" {
+		cfg.DatabaseURL = v
+	}
+	if v := strings.TrimSpace(os.Getenv("DB_MAX_CONNS")); v != "" {
+		sec, err := strconv.Atoi(v)
+		if err != nil {
+			*problems = append(*problems, Problem{Field: "DB_MAX_CONNS", Message: "DB_MAX_CONNS must be an integer"})
+		} else {
+			cfg.DBMaxConns = sec
+		}
+	}
+	if v := strings.TrimSpace(os.Getenv("DB_MIN_CONNS")); v != "" {
+		sec, err := strconv.Atoi(v)
+		if err != nil {
+			*problems = append(*problems, Problem{Field: "DB_MIN_CONNS", Message: "DB_MIN_CONNS must be an integer"})
+		} else {
+			cfg.DBMinConns = sec
+		}
+	}
+	if v := strings.TrimSpace(os.Getenv("DB_CONN_MAX_IDLE_SECONDS")); v != "" {
+		sec, err := strconv.Atoi(v)
+		if err != nil {
+			*problems = append(*problems, Problem{Field: "DB_CONN_MAX_IDLE_SECONDS", Message: "DB_CONN_MAX_IDLE_SECONDS must be an integer"})
+		} else {
+			cfg.DBConnMaxIdleSec = sec
+		}
+	}
+	if v := strings.TrimSpace(os.Getenv("DB_CONN_MAX_LIFETIME_SECONDS")); v != "" {
+		sec, err := strconv.Atoi(v)
+		if err != nil {
+			*problems = append(*problems, Problem{Field: "DB_CONN_MAX_LIFETIME_SECONDS", Message: "DB_CONN_MAX_LIFETIME_SECONDS must be an integer"})
+		} else {
+			cfg.DBConnMaxLifeSec = sec
+		}
+	}
+	if v := strings.TrimSpace(os.Getenv("AUDIT_ENABLED")); v != "" {
+		if b, ok := asBool(v); ok {
+			cfg.AuditEnabled = b
+		} else {
+			*problems = append(*problems, Problem{Field: "AUDIT_ENABLED", Message: "AUDIT_ENABLED must be a boolean"})
+		}
+	}
 }
 
 func applyConfigMap(cfg *Config, raw map[string]any, problems *[]Problem) {
@@ -251,6 +330,50 @@ func applyConfigMap(cfg *Config, raw map[string]any, problems *[]Problem) {
 			} else {
 				cfg.JWTClockSkewSec = sec
 			}
+		case "DATABASE_URL":
+			if s, ok := v.(string); ok {
+				cfg.DatabaseURL = strings.TrimSpace(s)
+			}
+		case "DB_MAX_CONNS":
+			sec, ok := asInt(v)
+			if !ok {
+				*problems = append(*problems, Problem{Field: "DB_MAX_CONNS", Message: "DB_MAX_CONNS must be an integer"})
+			} else {
+				cfg.DBMaxConns = sec
+			}
+		case "DB_MIN_CONNS":
+			sec, ok := asInt(v)
+			if !ok {
+				*problems = append(*problems, Problem{Field: "DB_MIN_CONNS", Message: "DB_MIN_CONNS must be an integer"})
+			} else {
+				cfg.DBMinConns = sec
+			}
+		case "DB_CONN_MAX_IDLE_SECONDS":
+			sec, ok := asInt(v)
+			if !ok {
+				*problems = append(*problems, Problem{Field: "DB_CONN_MAX_IDLE_SECONDS", Message: "DB_CONN_MAX_IDLE_SECONDS must be an integer"})
+			} else {
+				cfg.DBConnMaxIdleSec = sec
+			}
+		case "DB_CONN_MAX_LIFETIME_SECONDS":
+			sec, ok := asInt(v)
+			if !ok {
+				*problems = append(*problems, Problem{Field: "DB_CONN_MAX_LIFETIME_SECONDS", Message: "DB_CONN_MAX_LIFETIME_SECONDS must be an integer"})
+			} else {
+				cfg.DBConnMaxLifeSec = sec
+			}
+		case "AUDIT_ENABLED":
+			if s, ok := v.(string); ok {
+				if b, ok := asBool(s); ok {
+					cfg.AuditEnabled = b
+				} else {
+					*problems = append(*problems, Problem{Field: "AUDIT_ENABLED", Message: "AUDIT_ENABLED must be a boolean"})
+				}
+			} else if b, ok := v.(bool); ok {
+				cfg.AuditEnabled = b
+			} else {
+				*problems = append(*problems, Problem{Field: "AUDIT_ENABLED", Message: "AUDIT_ENABLED must be a boolean"})
+			}
 		}
 	}
 }
@@ -281,5 +404,16 @@ func asInt(v any) (int, bool) {
 		return i, err == nil
 	default:
 		return 0, false
+	}
+}
+
+func asBool(v string) (bool, bool) {
+	switch strings.ToLower(strings.TrimSpace(v)) {
+	case "true", "1", "yes", "y":
+		return true, true
+	case "false", "0", "no", "n":
+		return false, true
+	default:
+		return false, false
 	}
 }

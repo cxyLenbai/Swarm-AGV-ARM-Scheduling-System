@@ -324,7 +324,7 @@
 #### Sprint 2（01/13–01/26）：鉴权/多租户 + Postgres 事实来源
 - **目标**：把“谁能访问/访问哪个租户/访问行为可追溯/数据落到 Postgres”这 4 条安全与事实来源链路跑通，为 Sprint 3/4 的设备与任务闭环铺路。
 - [ ] **OIDC/JWT 鉴权（JWKS 缓存轮转）**
-  - 统一配置键（Go/Python 名称对齐）：`OIDC_ISSUER`、`OIDC_AUDIENCE`、`OIDC_JWKS_URL`（可选，默认 issuer/.well-known/jwks.json）、`JWKS_CACHE_TTL_SECONDS`、`JWT_CLOCK_SKEW_SECONDS`
+  - [x] 统一配置键（Go/Python 名称对齐）：`OIDC_ISSUER`、`OIDC_AUDIENCE`、`OIDC_JWKS_URL`（可选，默认 issuer/.well-known/jwks.json）、`JWKS_CACHE_TTL_SECONDS`、`JWT_CLOCK_SKEW_SECONDS`
   - 统一鉴权策略：仅接受 `Authorization: Bearer <jwt>`；校验 `iss/aud/exp/nbf`；允许少量 clock skew；错误映射 `UNAUTHENTICATED`
   - JWKS 缓存与轮转：按 `kid` 索引 key；命中失败时触发一次刷新；TTL 到期后台刷新（或下一次请求刷新）；网络失败时允许使用未过期缓存
   - 产出：通用“鉴权结果上下文”结构（`subject/email/name/roles/claims` 等）+ 中间件（Go `api` 优先，Python 服务如需对外暴露也复用）

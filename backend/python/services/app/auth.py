@@ -143,7 +143,7 @@ class JWTVerifier:
                 issuer=self._cfg.issuer,
                 audience=self._cfg.audience,
                 leeway=self._cfg.jwt_clock_skew_seconds,
-                options={"require": ["exp", "iss", "aud", "sub"]},
+                options={"require": ["exp", "nbf", "iss", "aud", "sub"]},
             )
         except jwt.ExpiredSignatureError as exc:
             raise AuthError("token expired") from exc

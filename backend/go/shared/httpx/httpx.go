@@ -14,6 +14,7 @@ import (
 	"log/slog"
 
 	"swarm-agv-arm-scheduling-system/shared/logx"
+	"swarm-agv-arm-scheduling-system/shared/tenantx"
 )
 
 type requestIDKey struct{}
@@ -117,16 +118,28 @@ func WithRequestLog(l logx.Logger, opts RequestLogOptions, next http.Handler) ht
 		next.ServeHTTP(lrw, r)
 
 		duration := time.Since(start)
-		l.Info(
-			r.Context(),
-			"http_request",
-			"http request",
+		attrs := []slog.Attr{
 			slog.String("request_id", RequestIDFromContext(r.Context())),
 			slog.String("method", r.Method),
 			slog.String("path", r.URL.Path),
 			slog.Int("status_code", lrw.statusCode),
 			slog.Int64("duration_ms", duration.Milliseconds()),
 			slog.String("client_ip", clientIP(r)),
+		}
+		tenantID := tenantx.TenantIDFromContext(r.Context())
+		if tenantID == "" {
+			if v := strings.TrimSpace(r.Header.Get("X-Tenant-ID")); v != "" {
+				tenantID = v
+			}
+		}
+		if tenantID != "" {
+			attrs = append(attrs, slog.String("tenant_id", tenantID))
+		}
+		l.Info(
+			r.Context(),
+			"http_request",
+			"http request",
+			attrs...,
 		)
 	})
 }
