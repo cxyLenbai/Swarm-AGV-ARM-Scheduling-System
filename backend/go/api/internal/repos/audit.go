@@ -1,35 +1,35 @@
-package repos
+package repos // 仓储包
 
-import (
-	"context"
-	"time"
+import ( // 依赖导入
+	"context" // 上下文处理
+	"time"    // 时间工具
 
-	"github.com/jackc/pgx/v5"
-	"github.com/jackc/pgx/v5/pgxpool"
+	"github.com/jackc/pgx/v5"         // pgx 批处理
+	"github.com/jackc/pgx/v5/pgxpool" // 连接池
 
-	"swarm-agv-arm-scheduling-system/api/internal/models"
+	"swarm-agv-arm-scheduling-system/api/internal/models" // 模型定义
 )
 
-type AuditRepo struct {
-	pool *pgxpool.Pool
+type AuditRepo struct { // 审计仓储
+	pool *pgxpool.Pool // 数据库连接池
 }
 
-func NewAuditRepo(pool *pgxpool.Pool) *AuditRepo {
-	return &AuditRepo{pool: pool}
+func NewAuditRepo(pool *pgxpool.Pool) *AuditRepo { // 构造审计仓储
+	return &AuditRepo{pool: pool} // 返回实例
 }
 
-func (r *AuditRepo) WriteAuditLog(ctx context.Context, entries []models.AuditLog) error {
-	if len(entries) == 0 {
-		return nil
+func (r *AuditRepo) WriteAuditLog(ctx context.Context, entries []models.AuditLog) error { // 写入审计日志
+	if len(entries) == 0 { // 空输入
+		return nil // 无需写入
 	}
 
-	batch := &pgx.Batch{}
-	for i := range entries {
-		entry := entries[i]
-		if entry.OccurredAt.IsZero() {
-			entry.OccurredAt = time.Now().UTC()
+	batch := &pgx.Batch{}    // 创建批处理
+	for i := range entries { // 遍历条目
+		entry := entries[i]            // 取出条目
+		if entry.OccurredAt.IsZero() { // 缺少时间
+			entry.OccurredAt = time.Now().UTC() // 使用当前时间
 		}
-		batch.Queue(`
+		batch.Queue(` // 追加批量 SQL
 			INSERT INTO audit_logs (
 				occurred_at, tenant_id, actor_user_id, subject, action,
 				resource_type, resource_id, request_id, method, path,
@@ -39,7 +39,7 @@ func (r *AuditRepo) WriteAuditLog(ctx context.Context, entries []models.AuditLog
 				$6, $7, $8, $9, $10,
 				$11, $12, $13, $14, $15
 			)
-		`,
+		`, // SQL 模板
 			entry.OccurredAt,
 			entry.TenantID,
 			entry.ActorUserID,
@@ -55,16 +55,16 @@ func (r *AuditRepo) WriteAuditLog(ctx context.Context, entries []models.AuditLog
 			nullIfEmpty(entry.ClientIP),
 			nullIfEmpty(entry.UserAgent),
 			entry.Details,
-		)
+		) // 绑定参数
 	}
 
-	br := r.pool.SendBatch(ctx, batch)
-	defer br.Close()
+	br := r.pool.SendBatch(ctx, batch) // 发送批处理
+	defer br.Close()                   // 关闭批处理
 
-	for range entries {
-		if _, err := br.Exec(); err != nil {
-			return err
+	for range entries { // 逐条执行
+		if _, err := br.Exec(); err != nil { // 执行失败
+			return err // 返回错误
 		}
 	}
-	return nil
+	return nil // 成功
 }

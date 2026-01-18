@@ -17,6 +17,7 @@ import (
 	"swarm-agv-arm-scheduling-system/shared/config"
 	"swarm-agv-arm-scheduling-system/shared/httpx"
 	"swarm-agv-arm-scheduling-system/shared/logx"
+	"swarm-agv-arm-scheduling-system/shared/workflow"
 	"syscall"
 	"time"
 )
@@ -100,11 +101,13 @@ func main() {
 
 	errCh := make(chan error, 1)
 	go func() {
+		taskStates := workflow.AllTaskStatuses()
 		logger.Info(context.Background(), "service_start", "starting service",
 			slog.String("addr", server.Addr),
 			slog.Int("http_port", cfg.HTTPPort),
 			slog.String("log_level", cfg.LogLevel),
 			slog.Int("request_timeout_ms", cfg.RequestTimeoutMS),
+			slog.Int("workflow_states", len(taskStates)),
 		)
 		errCh <- server.ListenAndServe()
 	}()

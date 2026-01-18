@@ -19,24 +19,25 @@ func (m AuthMiddleware) Wrap(next http.Handler) http.Handler {
 			next.ServeHTTP(w, r)
 			return
 		}
-
 		if m.Verifier == nil {
-			httpx.WriteError(w, r, http.StatusFailedPrecondition, "FAILED_PRECONDITION", "auth verifier not configured", nil)
+			httpx.WriteError(w, r, http.StatusServiceUnavailable, "FAILED_PRECONDITION", "auth verifier not configured", nil)
 			return
 		}
-
 		authHeader := strings.TrimSpace(r.Header.Get("Authorization"))
-		if !strings.HasPrefix(strings.ToLower(authHeader), "bearer ") {
+		if authHeader == "" || !strings.HasPrefix(strings.ToLower(authHeader), "bearer ") {
 			httpx.WriteError(w, r, http.StatusUnauthorized, "UNAUTHENTICATED", "missing bearer token", nil)
 			return
 		}
 		token := strings.TrimSpace(authHeader[len("bearer "):])
+		if token == "" {
+			httpx.WriteError(w, r, http.StatusUnauthorized, "UNAUTHENTICATED", "missing bearer token", nil)
+			return
+		}
 		auth, err := m.Verifier.Verify(r.Context(), token)
 		if err != nil {
 			httpx.WriteError(w, r, http.StatusUnauthorized, "UNAUTHENTICATED", "invalid token", nil)
 			return
 		}
-
 		ctx := authx.WithAuth(r.Context(), auth)
 		next.ServeHTTP(w, r.WithContext(ctx))
 	})

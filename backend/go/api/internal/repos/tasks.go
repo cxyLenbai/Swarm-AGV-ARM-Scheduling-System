@@ -16,6 +16,8 @@ type TasksRepo struct {
 	pool *pgxpool.Pool
 }
 
+var ErrInvalidTaskTransition = errors.New("invalid task transition")
+
 func NewTasksRepo(pool *pgxpool.Pool) *TasksRepo {
 	return &TasksRepo{pool: pool}
 }
@@ -66,6 +68,79 @@ func (r *TasksRepo) AppendTaskEvent(ctx context.Context, event models.TaskEvent)
 	return appendTaskEvent(ctx, r.pool, event)
 }
 
+func (r *TasksRepo) TransitionTaskStatus(ctx context.Context, tenantID uuid.UUID, taskID uuid.UUID, toStatus string, eventType string, payload []byte, actorUserID *uuid.UUID, canTransition func(string, string) bool, eventTypeForTransition func(string, string) string) (models.Task, bool, error) {
+	tx, err := r.pool.BeginTx(ctx, pgx.TxOptions{})
+	if err != nil {
+		return models.Task{}, false, err
+	}
+	defer func() {
+		if err != nil {
+			_ = tx.Rollback(ctx)
+		}
+	}()
+
+	var task models.Task
+	err = tx.QueryRow(ctx, `
+		SELECT task_id, tenant_id, task_type, status, idempotency_key, payload, created_by_user_id, created_at, updated_at
+		FROM tasks
+		WHERE tenant_id = $1 AND task_id = $2
+		FOR UPDATE
+	`, tenantID, taskID).
+		Scan(&task.TaskID, &task.TenantID, &task.TaskType, &task.Status, &task.IdempotencyKey, &task.Payload, &task.CreatedByUserID, &task.CreatedAt, &task.UpdatedAt)
+	if err != nil {
+		return models.Task{}, false, err
+	}
+	if task.Status == toStatus {
+		if err := tx.Commit(ctx); err != nil {
+			return models.Task{}, false, err
+		}
+		return task, false, nil
+	}
+	if canTransition != nil && !canTransition(task.Status, toStatus) {
+		return models.Task{}, false, ErrInvalidTaskTransition
+	}
+	if eventType == "" && eventTypeForTransition != nil {
+		eventType = eventTypeForTransition(task.Status, toStatus)
+	}
+
+	now := time.Now().UTC()
+	_, err = tx.Exec(ctx, `
+		UPDATE tasks
+		SET status = $3, updated_at = $4
+		WHERE tenant_id = $1 AND task_id = $2
+	`, tenantID, taskID, toStatus, now)
+	if err != nil {
+		return models.Task{}, false, err
+	}
+
+	fromStatus := task.Status
+	task.Status = toStatus
+	task.UpdatedAt = now
+
+	event := models.TaskEvent{
+		TenantID:    tenantID,
+		TaskID:      taskID,
+		EventType:   eventType,
+		OccurredAt:  now,
+		ActorUserID: actorUserID,
+		Payload:     payload,
+	}
+	if fromStatus != "" {
+		event.FromStatus = &fromStatus
+	}
+	if toStatus != "" {
+		event.ToStatus = &toStatus
+	}
+	if _, err = appendTaskEvent(ctx, tx, event); err != nil {
+		return models.Task{}, false, err
+	}
+
+	if err := tx.Commit(ctx); err != nil {
+		return models.Task{}, false, err
+	}
+	return task, true, nil
+}
+
 func (r *TasksRepo) CreateTaskWithEvent(ctx context.Context, tenantID uuid.UUID, taskType string, status string, idempotencyKey string, payload []byte, createdBy *uuid.UUID, event models.TaskEvent) (models.Task, bool, models.TaskEvent, error) {
 	tx, err := r.pool.BeginTx(ctx, pgx.TxOptions{})
 	if err != nil {
@@ -83,12 +158,14 @@ func (r *TasksRepo) CreateTaskWithEvent(ctx context.Context, tenantID uuid.UUID,
 		return models.Task{}, false, models.TaskEvent{}, err
 	}
 
-	event.TenantID = tenantID
-	event.TaskID = task.TaskID
-	event, err = appendTaskEvent(ctx, tx, event)
-	if err != nil {
-		_ = tx.Rollback(ctx)
-		return models.Task{}, false, models.TaskEvent{}, err
+	if created {
+		event.TenantID = tenantID
+		event.TaskID = task.TaskID
+		event, err = appendTaskEvent(ctx, tx, event)
+		if err != nil {
+			_ = tx.Rollback(ctx)
+			return models.Task{}, false, models.TaskEvent{}, err
+		}
 	}
 
 	if err := tx.Commit(ctx); err != nil {

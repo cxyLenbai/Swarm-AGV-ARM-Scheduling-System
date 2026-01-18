@@ -1,11 +1,12 @@
 package middleware
 
 import (
+	"errors"
 	"fmt"
 	"net/http"
 	"strings"
 
-	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5"
 
 	"swarm-agv-arm-scheduling-system/api/internal/repos"
 	"swarm-agv-arm-scheduling-system/shared/authx"
@@ -25,94 +26,103 @@ func (m TenantMiddleware) Wrap(next http.Handler) http.Handler {
 			return
 		}
 
-		headerTenantID := strings.TrimSpace(r.Header.Get("X-Tenant-ID"))
-		headerTenantSlug := strings.TrimSpace(r.Header.Get("X-Tenant-Slug"))
-
-		if headerTenantID == "" && headerTenantSlug == "" {
+		tenantID := strings.TrimSpace(r.Header.Get("X-Tenant-ID"))
+		tenantSlug := strings.TrimSpace(r.Header.Get("X-Tenant-Slug"))
+		if tenantID == "" && tenantSlug == "" {
 			httpx.WriteError(w, r, http.StatusBadRequest, "INVALID_ARGUMENT", "missing tenant header", nil)
 			return
 		}
 
-		var tenantID uuid.UUID
-		var tenantSlug string
-		if headerTenantID != "" {
-			parsed, err := uuid.Parse(headerTenantID)
-			if err != nil {
-				httpx.WriteError(w, r, http.StatusBadRequest, "INVALID_ARGUMENT", "invalid tenant id", nil)
-				return
-			}
-			tenantID = parsed
-		}
-
-		if headerTenantSlug != "" {
-			tenantSlug = headerTenantSlug
+		var tenant tenantx.TenantContext
+		if tenantSlug != "" {
 			if m.Tenants == nil {
-				httpx.WriteError(w, r, http.StatusFailedPrecondition, "FAILED_PRECONDITION", "tenant lookup not configured", nil)
+				httpx.WriteError(w, r, http.StatusServiceUnavailable, "FAILED_PRECONDITION", "tenant repository not configured", nil)
 				return
 			}
-			tenant, err := m.Tenants.GetTenantBySlug(r.Context(), headerTenantSlug)
+			record, err := m.Tenants.GetTenantBySlug(r.Context(), tenantSlug)
 			if err != nil {
-				httpx.WriteError(w, r, http.StatusNotFound, "NOT_FOUND", "tenant not found", nil)
+				if errors.Is(err, pgx.ErrNoRows) {
+					httpx.WriteError(w, r, http.StatusNotFound, "NOT_FOUND", "tenant not found", nil)
+					return
+				}
+				httpx.WriteError(w, r, http.StatusInternalServerError, "INTERNAL_ERROR", "failed to resolve tenant", nil)
 				return
 			}
-			if headerTenantID != "" && tenant.TenantID != tenantID {
+			if tenantID != "" && tenantID != record.TenantID.String() {
 				httpx.WriteError(w, r, http.StatusForbidden, "FORBIDDEN", "tenant mismatch", nil)
 				return
 			}
-			tenantID = tenant.TenantID
+			tenantID = record.TenantID.String()
+			tenant.Slug = record.Slug
 		}
 
-		if tenantID == uuid.Nil {
+		if tenantID == "" {
 			httpx.WriteError(w, r, http.StatusBadRequest, "INVALID_ARGUMENT", "missing tenant id", nil)
 			return
 		}
 
 		if auth, ok := authx.FromContext(r.Context()); ok {
-			if claimTenantID := strings.TrimSpace(asString(auth.Claims["tenant_id"])); claimTenantID != "" && claimTenantID != tenantID.String() {
-				httpx.WriteError(w, r, http.StatusForbidden, "FORBIDDEN", "tenant claim mismatch", nil)
-				return
-			}
-			if tenantsClaim := auth.Claims["tenants"]; tenantsClaim != nil && !claimContainsTenant(tenantsClaim, tenantID.String()) {
-				httpx.WriteError(w, r, http.StatusForbidden, "FORBIDDEN", "tenant not allowed", nil)
+			if err := validateTenantClaims(auth.Claims, tenantID); err != nil {
+				httpx.WriteError(w, r, http.StatusForbidden, "FORBIDDEN", err.Error(), nil)
 				return
 			}
 		}
 
-		ctx := tenantx.WithTenant(r.Context(), tenantx.TenantContext{
-			ID:   tenantID.String(),
-			Slug: tenantSlug,
-		})
+		tenant.ID = tenantID
+		if tenant.Slug == "" && tenantSlug != "" {
+			tenant.Slug = tenantSlug
+		}
+
+		ctx := tenantx.WithTenant(r.Context(), tenant)
 		next.ServeHTTP(w, r.WithContext(ctx))
 	})
 }
 
-func claimContainsTenant(claim any, tenantID string) bool {
-	switch t := claim.(type) {
-	case []string:
-		for _, v := range t {
-			if strings.TrimSpace(v) == tenantID {
-				return true
+func validateTenantClaims(claims map[string]any, tenantID string) error {
+	if claims == nil || tenantID == "" {
+		return nil
+	}
+	if v, ok := claims["tenant_id"]; ok {
+		claimTenantID := strings.TrimSpace(fmt.Sprint(v))
+		if claimTenantID != "" && claimTenantID != tenantID {
+			return errors.New("tenant claim mismatch")
+		}
+	}
+	if v, ok := claims["tenants"]; ok {
+		allowed := map[string]struct{}{}
+		switch t := v.(type) {
+		case []string:
+			for _, item := range t {
+				item = strings.TrimSpace(item)
+				if item != "" {
+					allowed[item] = struct{}{}
+				}
+			}
+		case []any:
+			for _, item := range t {
+				val := strings.TrimSpace(fmt.Sprint(item))
+				if val != "" {
+					allowed[val] = struct{}{}
+				}
+			}
+		case string:
+			for _, item := range strings.Fields(t) {
+				item = strings.TrimSpace(item)
+				if item != "" {
+					allowed[item] = struct{}{}
+				}
+			}
+		default:
+			val := strings.TrimSpace(fmt.Sprint(t))
+			if val != "" {
+				allowed[val] = struct{}{}
 			}
 		}
-	case []any:
-		for _, v := range t {
-			if strings.TrimSpace(asString(v)) == tenantID {
-				return true
-			}
-		}
-	case string:
-		for _, v := range strings.Fields(t) {
-			if strings.TrimSpace(v) == tenantID {
-				return true
+		if len(allowed) > 0 {
+			if _, ok := allowed[tenantID]; !ok {
+				return errors.New("tenant not allowed")
 			}
 		}
 	}
-	return false
-}
-
-func asString(v any) string {
-	if v == nil {
-		return ""
-	}
-	return strings.TrimSpace(fmt.Sprint(v))
+	return nil
 }

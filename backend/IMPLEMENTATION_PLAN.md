@@ -323,25 +323,25 @@
 
 #### Sprint 2（01/13–01/26）：鉴权/多租户 + Postgres 事实来源
 - **目标**：把“谁能访问/访问哪个租户/访问行为可追溯/数据落到 Postgres”这 4 条安全与事实来源链路跑通，为 Sprint 3/4 的设备与任务闭环铺路。
-- [ ] **OIDC/JWT 鉴权（JWKS 缓存轮转）**
+- [x] **OIDC/JWT 鉴权（JWKS 缓存轮转）**
   - [x] 统一配置键（Go/Python 名称对齐）：`OIDC_ISSUER`、`OIDC_AUDIENCE`、`OIDC_JWKS_URL`（可选，默认 issuer/.well-known/jwks.json）、`JWKS_CACHE_TTL_SECONDS`、`JWT_CLOCK_SKEW_SECONDS`
   - 统一鉴权策略：仅接受 `Authorization: Bearer <jwt>`；校验 `iss/aud/exp/nbf`；允许少量 clock skew；错误映射 `UNAUTHENTICATED`
   - JWKS 缓存与轮转：按 `kid` 索引 key；命中失败时触发一次刷新；TTL 到期后台刷新（或下一次请求刷新）；网络失败时允许使用未过期缓存
   - 产出：通用“鉴权结果上下文”结构（`subject/email/name/roles/claims` 等）+ 中间件（Go `api` 优先，Python 服务如需对外暴露也复用）
-- [ ] **Tenant 隔离中间件（强制租户边界）**
+- [x] **Tenant 隔离中间件（强制租户边界）**
   - 租户识别策略定版（建议最小可用）：请求头 `X-Tenant-ID`（或 `X-Tenant-Slug`）为主；JWT claims 中可选携带 `tenant_id/tenants` 做二次校验（header 与 token 不一致则 `FORBIDDEN`）
   - 在请求上下文中注入 `tenant_id`，并要求所有 Repo 查询都必须带 `tenant_id` 过滤（禁止“无租户条件”的全表操作）
   - 日志字段补齐：请求日志/错误日志统一带 `tenant_id`（如果解析到）
   - 最小验证端点：`GET /api/v1/me`（返回用户 claims）+ `GET /api/v1/tenants/current`（返回当前 tenant）
-- [ ] **审计日志最小版（可追溯）**
+- [x] **审计日志最小版（可追溯）**
   - 审计事件范围（先最小可用）：登录/鉴权失败、写接口（POST/PUT/PATCH/DELETE）、关键资源（robots/tasks）读写
   - 记录字段（建议）：`audit_id`、`occurred_at`、`tenant_id`、`actor_user_id`（可空）/`subject`、`action`、`resource_type/resource_id`（可空）、`request_id`、`method/path/status_code/duration_ms`、`client_ip/user_agent`、`details(jsonb)`
   - 写入策略：请求结束后异步写入（失败只告警不影响主请求）；提供最小开关（例如 `AUDIT_ENABLED`）
-- [ ] **Postgres 连接池（服务可读写事实来源）**
+- [x] **Postgres 连接池（服务可读写事实来源）**
   - 统一配置键：`DATABASE_URL`、`DB_MAX_CONNS`、`DB_MIN_CONNS`、`DB_CONN_MAX_IDLE_SECONDS`、`DB_CONN_MAX_LIFETIME_SECONDS`
   - 连接池封装（建议 `pgxpool`）：初始化/关闭钩子；`readyz` 增加 `SELECT 1` 探测（失败则 503）
   - 迁移执行策略：本地/CI 启动前跑 migrations（或服务启动时可选自动迁移，默认关闭）
-- [ ] **Migrations（事实来源 Schema 定版）**
+- [x] **Migrations（事实来源 Schema 定版）**
   - 落点建议：`backend/migrations/`（按时间戳排序），并提供一条命令执行（`make migrate-up` / `backend/scripts/migrate.*`）
   - 核心表（最小可用）
     - `tenants`：`tenant_id`（uuid pk）、`slug`（unique）、`name`、`created_at`
@@ -351,7 +351,7 @@
     - `task_events`：`event_id`（uuid pk）、`tenant_id`（fk）、`task_id`（fk）、`event_type`、`from_status/to_status`（可空）、`occurred_at`、`actor_user_id`（可空）、`payload`（jsonb）；索引（`tenant_id, task_id, occurred_at`）
     - `audit_logs`（若采纳审计表）：按上文字段定版并加索引（`tenant_id, occurred_at`、`request_id`）
   - 约束要求：所有表必须有 `tenant_id`；FK on delete 策略定版（建议先 RESTRICT/NO ACTION，避免误删扩散）
-- [ ] **Repo 层最小实现（支撑后续设备/任务）**
+- [x] **Repo 层最小实现（支撑后续设备/任务）**
   - 仓储接口（按领域拆分）：`TenantsRepo/UsersRepo/RobotsRepo/TasksRepo/AuditRepo`（都以 `tenant_id` 为必传参数）
   - 关键方法（最小集合）
     - tenants：`CreateTenant`、`GetTenantByID/Slug`
@@ -372,14 +372,14 @@
   - 审计日志（若开启）在写接口请求后可在 DB 查到对应记录，并带 `request_id/tenant_id/subject/status_code`
 
 #### Sprint 3（01/27–02/09）：设备接入 MVP（先让“数据”进来）
-- 设备注册/更新 API；状态上报（心跳/在线/位置/电量）
-- 状态入库（先 Postgres 做 MVP）+ 查询“最新状态”API
-- 基础中间件补齐：CORS、限流（先简单策略）
+- [x] 设备注册/更新 API；状态上报（心跳/在线/位置/电量）
+- [x] 状态入库（先 Postgres 做 MVP）+ 查询“最新状态”API
+- [x] 基础中间件补齐：CORS、限流（先简单策略）
 
 #### Sprint 4（02/10–02/23）：任务模型 + 状态机闭环（DB 侧打通）
-- 任务创建/取消/查询；创建幂等键；状态流转幂等
-- core `workflow` 状态机落地；`task_events` 记录关键流转
-- 为事件流做准备：定义 task/robot 领域事件的字段集合（event_id/tenant_id/occurred_at 等）
+- [x] 任务创建/取消/查询；创建幂等键；状态流转幂等
+- [x] core `workflow` 状态机落地；`task_events` 记录关键流转
+- [x] 为事件流做准备：定义 task/robot 领域事件的字段集合（event_id/tenant_id/occurred_at 等）
 
 #### Sprint 5（02/24–03/09）：Kafka 基座 + Topic/Schema 定版 + 最小生产消费链路
 - Topic 定版：`robot.status`、`task.events`、`alerts`、`scheduler.decisions`、`congestion.metrics`、`congestion.predictions`

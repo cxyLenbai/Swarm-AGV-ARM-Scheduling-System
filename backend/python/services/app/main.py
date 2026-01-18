@@ -67,6 +67,30 @@ app = FastAPI(
 jwt_verifier = JWTVerifier.from_settings(settings)
 db_pool = create_pool(settings.DATABASE_URL, settings.DB_MIN_CONNS, settings.DB_MAX_CONNS)
 
+TASK_STATUS_PENDING = "pending"
+TASK_STATUS_RUNNING = "running"
+TASK_STATUS_DONE = "done"
+TASK_STATUS_FAILED = "failed"
+TASK_STATUS_CANCELED = "canceled"
+
+TASK_EVENT_CREATED = "task_created"
+TASK_EVENT_STARTED = "task_started"
+TASK_EVENT_COMPLETED = "task_completed"
+TASK_EVENT_FAILED = "task_failed"
+TASK_EVENT_CANCELED = "task_canceled"
+
+TASK_TRANSITIONS = {
+    TASK_STATUS_PENDING: {
+        TASK_STATUS_RUNNING: TASK_EVENT_STARTED,
+        TASK_STATUS_CANCELED: TASK_EVENT_CANCELED,
+    },
+    TASK_STATUS_RUNNING: {
+        TASK_STATUS_DONE: TASK_EVENT_COMPLETED,
+        TASK_STATUS_FAILED: TASK_EVENT_FAILED,
+        TASK_STATUS_CANCELED: TASK_EVENT_CANCELED,
+    },
+}
+
 
 def get_request_id(request: Request) -> str:
     return getattr(request.state, "request_id", "")
@@ -131,6 +155,26 @@ def resource_from_path(path: str) -> Tuple[Optional[str], Optional[str]]:
     return None, None
 
 
+def normalize_status(status: Optional[str]) -> str:
+    return (status or "").strip().lower()
+
+
+def can_transition(from_status: str, to_status: str) -> bool:
+    from_status = normalize_status(from_status)
+    to_status = normalize_status(to_status)
+    if from_status == to_status:
+        return True
+    return to_status in TASK_TRANSITIONS.get(from_status, {})
+
+
+def event_type_for_transition(from_status: str, to_status: str) -> str:
+    from_status = normalize_status(from_status)
+    to_status = normalize_status(to_status)
+    if from_status == to_status:
+        return ""
+    return TASK_TRANSITIONS.get(from_status, {}).get(to_status, "")
+
+
 async def fetch_tenant_by_slug(slug: str) -> Optional[Tuple[str, str, str]]:
     if db_pool is None:
         return None
@@ -148,6 +192,222 @@ async def fetch_tenant_by_slug(slug: str) -> Optional[Tuple[str, str, str]]:
         return None
 
     return await asyncio.to_thread(_query)
+
+
+async def create_task(tenant_id: str, task_type: str, idempotency_key: str, payload: Dict[str, Any]) -> Tuple[Dict[str, Any], bool]:
+    if db_pool is None:
+        raise RuntimeError("db pool not configured")
+
+    def _create() -> Tuple[Dict[str, Any], bool]:
+        with db_pool.connection() as conn:
+            with conn.transaction():
+                with conn.cursor() as cur:
+                    cur.execute(
+                        """
+                        INSERT INTO tasks (tenant_id, task_type, status, idempotency_key, payload, created_at, updated_at)
+                        VALUES (%s, %s, %s, %s, %s, now(), now())
+                        ON CONFLICT (tenant_id, idempotency_key) DO NOTHING
+                        RETURNING task_id, tenant_id, task_type, status, idempotency_key, payload, created_by_user_id, created_at, updated_at
+                        """,
+                        (tenant_id, task_type, TASK_STATUS_PENDING, idempotency_key, json.dumps(payload or {})),
+                    )
+                    row = cur.fetchone()
+                    created = row is not None
+                    if not created:
+                        cur.execute(
+                            """
+                            SELECT task_id, tenant_id, task_type, status, idempotency_key, payload, created_by_user_id, created_at, updated_at
+                            FROM tasks
+                            WHERE tenant_id = %s AND idempotency_key = %s
+                            """,
+                            (tenant_id, idempotency_key),
+                        )
+                        row = cur.fetchone()
+                    if row is None:
+                        raise RuntimeError("failed to create task")
+                    task_id = str(row[0])
+                    if created:
+                        cur.execute(
+                            """
+                            INSERT INTO task_events (tenant_id, task_id, event_type, from_status, to_status, occurred_at, payload)
+                            VALUES (%s, %s, %s, %s, %s, now(), %s)
+                            """,
+                            (
+                                tenant_id,
+                                task_id,
+                                TASK_EVENT_CREATED,
+                                None,
+                                TASK_STATUS_PENDING,
+                                json.dumps({"payload": payload or {}}),
+                            ),
+                        )
+                    return {
+                        "task_id": task_id,
+                        "tenant_id": str(row[1]),
+                        "task_type": row[2],
+                        "status": row[3],
+                        "idempotency_key": row[4],
+                        "payload": row[5] or {},
+                        "created_by_user_id": row[6],
+                        "created_at": row[7].isoformat(),
+                        "updated_at": row[8].isoformat(),
+                    }, created
+
+    return await asyncio.to_thread(_create)
+
+
+async def get_task(tenant_id: str, task_id: str) -> Optional[Dict[str, Any]]:
+    if db_pool is None:
+        raise RuntimeError("db pool not configured")
+
+    def _get() -> Optional[Dict[str, Any]]:
+        with db_pool.connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    SELECT task_id, tenant_id, task_type, status, idempotency_key, payload, created_by_user_id, created_at, updated_at
+                    FROM tasks
+                    WHERE tenant_id = %s AND task_id = %s
+                    """,
+                    (tenant_id, task_id),
+                )
+                row = cur.fetchone()
+                if not row:
+                    return None
+                return {
+                    "task_id": str(row[0]),
+                    "tenant_id": str(row[1]),
+                    "task_type": row[2],
+                    "status": row[3],
+                    "idempotency_key": row[4],
+                    "payload": row[5] or {},
+                    "created_by_user_id": row[6],
+                    "created_at": row[7].isoformat(),
+                    "updated_at": row[8].isoformat(),
+                }
+
+    return await asyncio.to_thread(_get)
+
+
+async def list_tasks(tenant_id: str, limit: int, offset: int) -> Dict[str, Any]:
+    if db_pool is None:
+        raise RuntimeError("db pool not configured")
+
+    def _list() -> Dict[str, Any]:
+        with db_pool.connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    SELECT task_id, tenant_id, task_type, status, idempotency_key, payload, created_by_user_id, created_at, updated_at
+                    FROM tasks
+                    WHERE tenant_id = %s
+                    ORDER BY created_at DESC
+                    LIMIT %s OFFSET %s
+                    """,
+                    (tenant_id, limit, offset),
+                )
+                tasks = []
+                for row in cur.fetchall():
+                    tasks.append(
+                        {
+                            "task_id": str(row[0]),
+                            "tenant_id": str(row[1]),
+                            "task_type": row[2],
+                            "status": row[3],
+                            "idempotency_key": row[4],
+                            "payload": row[5] or {},
+                            "created_by_user_id": row[6],
+                            "created_at": row[7].isoformat(),
+                            "updated_at": row[8].isoformat(),
+                        }
+                    )
+                return {"tasks": tasks, "limit": limit, "offset": offset}
+
+    return await asyncio.to_thread(_list)
+
+
+async def transition_task_status(tenant_id: str, task_id: str, to_status: str, payload: Dict[str, Any]) -> Tuple[Optional[Dict[str, Any]], bool, Optional[str]]:
+    if db_pool is None:
+        raise RuntimeError("db pool not configured")
+
+    def _transition() -> Tuple[Optional[Dict[str, Any]], bool, Optional[str]]:
+        with db_pool.connection() as conn:
+            with conn.transaction():
+                with conn.cursor() as cur:
+                    cur.execute(
+                        """
+                        SELECT task_id, tenant_id, task_type, status, idempotency_key, payload, created_by_user_id, created_at, updated_at
+                        FROM tasks
+                        WHERE tenant_id = %s AND task_id = %s
+                        FOR UPDATE
+                        """,
+                        (tenant_id, task_id),
+                    )
+                    row = cur.fetchone()
+                    if not row:
+                        return None, False, "not_found"
+                    current_status = row[3]
+                    if normalize_status(current_status) == normalize_status(to_status):
+                        return {
+                            "task_id": str(row[0]),
+                            "tenant_id": str(row[1]),
+                            "task_type": row[2],
+                            "status": row[3],
+                            "idempotency_key": row[4],
+                            "payload": row[5] or {},
+                            "created_by_user_id": row[6],
+                            "created_at": row[7].isoformat(),
+                            "updated_at": row[8].isoformat(),
+                        }, False, None
+                    if not can_transition(current_status, to_status):
+                        return None, False, "invalid_transition"
+                    event_type = event_type_for_transition(current_status, to_status)
+                    cur.execute(
+                        """
+                        UPDATE tasks
+                        SET status = %s, updated_at = now()
+                        WHERE tenant_id = %s AND task_id = %s
+                        """,
+                        (to_status, tenant_id, task_id),
+                    )
+                    cur.execute(
+                        """
+                        INSERT INTO task_events (tenant_id, task_id, event_type, from_status, to_status, occurred_at, payload)
+                        VALUES (%s, %s, %s, %s, %s, now(), %s)
+                        """,
+                        (
+                            tenant_id,
+                            task_id,
+                            event_type,
+                            current_status,
+                            to_status,
+                            json.dumps(payload or {}),
+                        ),
+                    )
+                    cur.execute(
+                        """
+                        SELECT task_id, tenant_id, task_type, status, idempotency_key, payload, created_by_user_id, created_at, updated_at
+                        FROM tasks
+                        WHERE tenant_id = %s AND task_id = %s
+                        """,
+                        (tenant_id, task_id),
+                    )
+                    row = cur.fetchone()
+                    if not row:
+                        return None, False, "not_found"
+                    return {
+                        "task_id": str(row[0]),
+                        "tenant_id": str(row[1]),
+                        "task_type": row[2],
+                        "status": row[3],
+                        "idempotency_key": row[4],
+                        "payload": row[5] or {},
+                        "created_by_user_id": row[6],
+                        "created_at": row[7].isoformat(),
+                        "updated_at": row[8].isoformat(),
+                    }, True, None
+
+    return await asyncio.to_thread(_transition)
 
 
 async def write_audit_log(entry: Dict[str, Any]) -> None:
@@ -473,6 +733,149 @@ def current_tenant(request: Request):
         "slug": tenant_slug,
         "name": tenant_name,
     }
+
+
+@app.post("/api/v1/tasks")
+async def create_task_endpoint(request: Request):
+    tenant_id = getattr(request.state, "tenant_id", None)
+    if not tenant_id:
+        return JSONResponse(
+            status_code=400,
+            content=error_response("INVALID_ARGUMENT", "missing tenant", get_request_id(request)),
+        )
+    body = await request.json()
+    task_type = str(body.get("task_type") or "").strip()
+    idempotency_key = str(body.get("idempotency_key") or "").strip()
+    payload = body.get("payload") or {}
+    if not task_type or not idempotency_key:
+        return JSONResponse(
+            status_code=400,
+            content=error_response("INVALID_ARGUMENT", "missing task_type or idempotency_key", get_request_id(request)),
+        )
+    task, created = await create_task(tenant_id, task_type, idempotency_key, payload)
+    status_code = 201 if created else 200
+    task["created"] = created
+    return JSONResponse(status_code=status_code, content=task)
+
+
+@app.get("/api/v1/tasks")
+async def list_tasks_endpoint(request: Request):
+    tenant_id = getattr(request.state, "tenant_id", None)
+    if not tenant_id:
+        return JSONResponse(
+            status_code=400,
+            content=error_response("INVALID_ARGUMENT", "missing tenant", get_request_id(request)),
+        )
+    try:
+        limit = int(request.query_params.get("limit") or 50)
+        offset = int(request.query_params.get("offset") or 0)
+    except ValueError:
+        return JSONResponse(
+            status_code=400,
+            content=error_response("INVALID_ARGUMENT", "invalid pagination", get_request_id(request)),
+        )
+    result = await list_tasks(tenant_id, limit, offset)
+    return JSONResponse(status_code=200, content=result)
+
+
+@app.get("/api/v1/tasks/{task_id}")
+async def get_task_endpoint(task_id: str, request: Request):
+    tenant_id = getattr(request.state, "tenant_id", None)
+    if not tenant_id:
+        return JSONResponse(
+            status_code=400,
+            content=error_response("INVALID_ARGUMENT", "missing tenant", get_request_id(request)),
+        )
+    try:
+        uuid.UUID(task_id)
+    except ValueError:
+        return JSONResponse(
+            status_code=400,
+            content=error_response("INVALID_ARGUMENT", "invalid task_id", get_request_id(request)),
+        )
+    task = await get_task(tenant_id, task_id)
+    if not task:
+        return JSONResponse(
+            status_code=404,
+            content=error_response("NOT_FOUND", "task not found", get_request_id(request)),
+        )
+    return JSONResponse(status_code=200, content=task)
+
+
+@app.post("/api/v1/tasks/{task_id}/cancel")
+async def cancel_task_endpoint(task_id: str, request: Request):
+    tenant_id = getattr(request.state, "tenant_id", None)
+    if not tenant_id:
+        return JSONResponse(
+            status_code=400,
+            content=error_response("INVALID_ARGUMENT", "missing tenant", get_request_id(request)),
+        )
+    try:
+        uuid.UUID(task_id)
+    except ValueError:
+        return JSONResponse(
+            status_code=400,
+            content=error_response("INVALID_ARGUMENT", "invalid task_id", get_request_id(request)),
+        )
+    task, changed, err = await transition_task_status(tenant_id, task_id, TASK_STATUS_CANCELED, {"action": "cancel"})
+    if err == "not_found":
+        return JSONResponse(
+            status_code=404,
+            content=error_response("NOT_FOUND", "task not found", get_request_id(request)),
+        )
+    if err == "invalid_transition":
+        return JSONResponse(
+            status_code=409,
+            content=error_response("CONFLICT", "invalid task transition", get_request_id(request)),
+        )
+    if not task:
+        return JSONResponse(
+            status_code=500,
+            content=error_response("INTERNAL_ERROR", "failed to cancel task", get_request_id(request)),
+        )
+    return JSONResponse(status_code=200, content={"task_id": task["task_id"], "status": task["status"], "updated_at": task["updated_at"], "changed": changed})
+
+
+@app.post("/api/v1/tasks/{task_id}/status")
+async def update_task_status_endpoint(task_id: str, request: Request):
+    tenant_id = getattr(request.state, "tenant_id", None)
+    if not tenant_id:
+        return JSONResponse(
+            status_code=400,
+            content=error_response("INVALID_ARGUMENT", "missing tenant", get_request_id(request)),
+        )
+    try:
+        uuid.UUID(task_id)
+    except ValueError:
+        return JSONResponse(
+            status_code=400,
+            content=error_response("INVALID_ARGUMENT", "invalid task_id", get_request_id(request)),
+        )
+    body = await request.json()
+    to_status = normalize_status(body.get("status"))
+    if not to_status:
+        return JSONResponse(
+            status_code=400,
+            content=error_response("INVALID_ARGUMENT", "missing status", get_request_id(request)),
+        )
+    payload = body.get("payload") or {}
+    task, changed, err = await transition_task_status(tenant_id, task_id, to_status, payload)
+    if err == "not_found":
+        return JSONResponse(
+            status_code=404,
+            content=error_response("NOT_FOUND", "task not found", get_request_id(request)),
+        )
+    if err == "invalid_transition":
+        return JSONResponse(
+            status_code=409,
+            content=error_response("CONFLICT", "invalid task transition", get_request_id(request)),
+        )
+    if not task:
+        return JSONResponse(
+            status_code=500,
+            content=error_response("INTERNAL_ERROR", "failed to transition task", get_request_id(request)),
+        )
+    return JSONResponse(status_code=200, content={"task_id": task["task_id"], "status": task["status"], "updated_at": task["updated_at"], "changed": changed})
 
 @app.get("/readyz")
 def readyz(request: Request):
