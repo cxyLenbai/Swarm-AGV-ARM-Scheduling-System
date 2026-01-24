@@ -1,13 +1,21 @@
 import json
 import logging
+import os
 import uuid
 from datetime import datetime, timezone
 import asyncio
 from typing import Any, Dict, Optional, Tuple
 from fastapi import FastAPI, Request
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, Response
 from fastapi.exceptions import RequestValidationError
 from starlette.exceptions import HTTPException as StarletteHTTPException
+from prometheus_client import Counter, Histogram, generate_latest, CONTENT_TYPE_LATEST
+from opentelemetry import trace
+from opentelemetry.sdk.resources import Resource
+from opentelemetry.sdk.trace import TracerProvider
+from opentelemetry.sdk.trace.export import BatchSpanProcessor
+from opentelemetry.exporter.otlp.proto.grpc.trace_exporter import OTLPSpanExporter
+from opentelemetry.instrumentation.fastapi import FastAPIInstrumentor
 
 try:
     from .settings import config_problems, settings
@@ -64,6 +72,39 @@ app = FastAPI(
     description=f"Service running in {settings.ENV} environment",
 )
 
+init_tracing()
+
+
+def init_tracing() -> None:
+    if os.getenv("OTEL_ENABLED", "").strip().lower() not in ("1", "true", "yes", "y"):
+        return
+    endpoint = os.getenv("OTEL_EXPORTER_OTLP_ENDPOINT", "").strip()
+    if not endpoint:
+        return
+    insecure = os.getenv("OTEL_EXPORTER_OTLP_INSECURE", "true").strip().lower() in ("1", "true", "yes", "y")
+    resource = Resource.create(
+        {
+            "service.name": settings.SERVICE_NAME,
+            "deployment.environment": settings.ENV,
+        }
+    )
+    provider = TracerProvider(resource=resource)
+    exporter = OTLPSpanExporter(endpoint=endpoint, insecure=insecure)
+    provider.add_span_processor(BatchSpanProcessor(exporter))
+    trace.set_tracer_provider(provider)
+    FastAPIInstrumentor.instrument_app(app)
+
+http_requests_total = Counter(
+    "http_requests_total",
+    "Total HTTP requests",
+    ["method", "path", "status_code"],
+)
+http_request_duration_seconds = Histogram(
+    "http_request_duration_seconds",
+    "HTTP request duration in seconds",
+    ["method", "path", "status_code"],
+)
+
 jwt_verifier = JWTVerifier.from_settings(settings)
 db_pool = create_pool(settings.DATABASE_URL, settings.DB_MIN_CONNS, settings.DB_MAX_CONNS)
 
@@ -96,7 +137,7 @@ def get_request_id(request: Request) -> str:
     return getattr(request.state, "request_id", "")
 
 def is_public_path(path: str) -> bool:
-    if path in ("/healthz", "/readyz", "/openapi.json"):
+    if path in ("/healthz", "/readyz", "/openapi.json", "/metrics"):
         return True
     if path.startswith("/docs") or path.startswith("/redoc"):
         return True
@@ -572,6 +613,12 @@ async def base_middleware(request: Request, call_next):
         )
 
     response.headers["X-Request-ID"] = request_id
+    http_requests_total.labels(request.method, request.url.path, str(getattr(response, "status_code", 200))).inc()
+    http_request_duration_seconds.labels(
+        request.method,
+        request.url.path,
+        str(getattr(response, "status_code", 200)),
+    ).observe((datetime.now(tz=timezone.utc) - start).total_seconds())
 
     if request.url.path != "/healthz":
         log_extra = {
@@ -697,7 +744,12 @@ def healthz():
         "port": settings.HTTP_PORT,
         "version": settings.VERSION,
         "status": "ok",
-    }
+}
+
+
+@app.get("/metrics")
+def metrics():
+    return Response(content=generate_latest(), media_type=CONTENT_TYPE_LATEST)
 
 
 @app.get("/api/v1/me")
@@ -733,6 +785,39 @@ def current_tenant(request: Request):
         "slug": tenant_slug,
         "name": tenant_name,
     }
+
+
+@app.post("/api/v1/congestion/predict")
+async def predict_congestion(request: Request):
+    tenant_id = getattr(request.state, "tenant_id", None)
+    if not tenant_id:
+        return JSONResponse(
+            status_code=400,
+            content=error_response("INVALID_ARGUMENT", "missing tenant", get_request_id(request)),
+        )
+    body = await request.json()
+    horizon = int(body.get("horizon_seconds") or 0)
+    zones = body.get("zones") or []
+    predictions = []
+    for zone in zones:
+        zone_id = str(zone.get("zone_id") or "").strip()
+        if not zone_id:
+            continue
+        congestion_index = float(zone.get("congestion_index") or 0)
+        queue_length = float(zone.get("queue_length") or 0)
+        risk = min(1.0, max(0.0, congestion_index + queue_length / 20.0))
+        confidence = min(1.0, max(0.0, 0.5 + congestion_index / 2.0))
+        suggested_action = "reroute" if risk >= 0.7 else "monitor"
+        predictions.append(
+            {
+                "zone_id": zone_id,
+                "horizon_seconds": horizon,
+                "risk": risk,
+                "confidence": confidence,
+                "suggested_action": suggested_action,
+            }
+        )
+    return JSONResponse(status_code=200, content={"predictions": predictions})
 
 
 @app.post("/api/v1/tasks")

@@ -1,6 +1,6 @@
 param(
   [Parameter(Mandatory = $true)]
-  [ValidateSet("api", "core", "py")]
+  [ValidateSet("api", "core", "py", "consumer", "worker", "congestion")]
   [string]$Target,
 
   [string]$Env = "dev",
@@ -53,8 +53,47 @@ function Invoke-DevPy {
   }
 }
 
+function Invoke-DevConsumer {
+  $env:SERVICE_NAME = "task-events-consumer"
+  $env:ENV = $Env
+  $env:VERSION = $Version
+  Push-Location (Join-Path $PSScriptRoot "..\\go")
+  try {
+    go run .\\api\\cmd\\consumer
+  } finally {
+    Pop-Location
+  }
+}
+
+function Invoke-DevWorker {
+  $env:SERVICE_NAME = "outbox-worker"
+  $env:ENV = $Env
+  $env:VERSION = $Version
+  Push-Location (Join-Path $PSScriptRoot "..\\go")
+  try {
+    go run .\\api\\cmd\\worker
+  } finally {
+    Pop-Location
+  }
+}
+
+function Invoke-DevCongestion {
+  $env:SERVICE_NAME = "congestion-worker"
+  $env:ENV = $Env
+  $env:VERSION = $Version
+  Push-Location (Join-Path $PSScriptRoot "..\\go")
+  try {
+    go run .\\api\\cmd\\congestion-worker
+  } finally {
+    Pop-Location
+  }
+}
+
 switch ($Target) {
   "api" { Invoke-DevApi }
   "core" { Invoke-DevCore }
   "py" { Invoke-DevPy }
+  "consumer" { Invoke-DevConsumer }
+  "worker" { Invoke-DevWorker }
+  "congestion" { Invoke-DevCongestion }
 }

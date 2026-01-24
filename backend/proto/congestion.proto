@@ -1,0 +1,33 @@
+syntax = "proto3";
+
+package swarm.congestion.v1;
+
+message PredictCongestionHotspotsRequest {
+  string tenant_id = 1;
+  int32 horizon_seconds = 2;
+  repeated ZoneSignal zones = 3;
+  map<string, double> signals = 4;
+}
+
+message ZoneSignal {
+  string zone_id = 1;
+  double congestion_index = 2;
+  double avg_speed = 3;
+  double queue_length = 4;
+}
+
+message PredictCongestionHotspotsResponse {
+  repeated ZonePrediction predictions = 1;
+}
+
+message ZonePrediction {
+  string zone_id = 1;
+  int32 horizon_seconds = 2;
+  double risk = 3;
+  double confidence = 4;
+  string suggested_action = 5;
+}
+
+service CongestionPredictorService {
+  rpc PredictCongestionHotspots(PredictCongestionHotspotsRequest) returns (PredictCongestionHotspotsResponse);
+}

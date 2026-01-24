@@ -1,0 +1,113 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: swarm-outbox-worker
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: swarm-outbox-worker
+  template:
+    metadata:
+      labels:
+        app: swarm-outbox-worker
+    spec:
+      containers:
+        - name: outbox-worker
+          image: swarm-workers:latest
+          command: ["/app/outbox-worker"]
+          env:
+            - name: SERVICE_NAME
+              value: "outbox-worker"
+            - name: ENV
+              value: "prod"
+            - name: DATABASE_URL
+              valueFrom:
+                secretKeyRef:
+                  name: swarm-secrets
+                  key: database_url
+            - name: KAFKA_BROKERS
+              value: "kafka:9092"
+            - name: ASYNQ_REDIS_ADDR
+              value: "redis:6379"
+            - name: ASYNQ_ENABLED
+              value: "true"
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: swarm-task-consumer
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: swarm-task-consumer
+  template:
+    metadata:
+      labels:
+        app: swarm-task-consumer
+    spec:
+      containers:
+        - name: task-consumer
+          image: swarm-workers:latest
+          command: ["/app/task-consumer"]
+          env:
+            - name: SERVICE_NAME
+              value: "task-events-consumer"
+            - name: ENV
+              value: "prod"
+            - name: DATABASE_URL
+              valueFrom:
+                secretKeyRef:
+                  name: swarm-secrets
+                  key: database_url
+            - name: KAFKA_BROKERS
+              value: "kafka:9092"
+            - name: KAFKA_CONSUMER_GROUP
+              value: "swarm-task-consumer"
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: swarm-congestion-worker
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: swarm-congestion-worker
+  template:
+    metadata:
+      labels:
+        app: swarm-congestion-worker
+    spec:
+      containers:
+        - name: congestion-worker
+          image: swarm-workers:latest
+          command: ["/app/congestion-worker"]
+          env:
+            - name: SERVICE_NAME
+              value: "congestion-worker"
+            - name: ENV
+              value: "prod"
+            - name: DATABASE_URL
+              valueFrom:
+                secretKeyRef:
+                  name: swarm-secrets
+                  key: database_url
+            - name: KAFKA_BROKERS
+              value: "kafka:9092"
+            - name: KAFKA_CONSUMER_GROUP
+              value: "swarm-congestion"
+            - name: REDIS_ADDR
+              value: "redis:6379"
+            - name: INFLUX_URL
+              value: "http://influxdb:8086"
+            - name: INFLUX_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: swarm-secrets
+                  key: influx_token
+            - name: INFLUX_ORG
+              value: "swarm"
+            - name: INFLUX_BUCKET
+              value: "swarm_robot_status"

@@ -1,0 +1,15 @@
+FROM golang:1.22-alpine AS build
+WORKDIR /src
+COPY go.work go.work.sum ./
+COPY backend/go ./backend/go
+RUN cd backend/go && go build -o /out/outbox-worker ./api/cmd/worker
+RUN cd backend/go && go build -o /out/task-consumer ./api/cmd/consumer
+RUN cd backend/go && go build -o /out/congestion-worker ./api/cmd/congestion-worker
+
+FROM alpine:3.19
+RUN addgroup -S app && adduser -S app -G app
+USER app
+WORKDIR /app
+COPY --from=build /out/outbox-worker /app/outbox-worker
+COPY --from=build /out/task-consumer /app/task-consumer
+COPY --from=build /out/congestion-worker /app/congestion-worker

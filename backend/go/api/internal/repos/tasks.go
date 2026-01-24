@@ -2,6 +2,7 @@ package repos
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"time"
 
@@ -10,6 +11,7 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"swarm-agv-arm-scheduling-system/api/internal/models"
+	"swarm-agv-arm-scheduling-system/shared/events"
 )
 
 type TasksRepo struct {
@@ -66,6 +68,175 @@ func (r *TasksRepo) ListTasks(ctx context.Context, tenantID uuid.UUID, limit int
 
 func (r *TasksRepo) AppendTaskEvent(ctx context.Context, event models.TaskEvent) (models.TaskEvent, error) {
 	return appendTaskEvent(ctx, r.pool, event)
+}
+
+func (r *TasksRepo) InsertTaskEventFromStream(ctx context.Context, event models.TaskEvent) (bool, error) {
+	if event.EventID == uuid.Nil {
+		return false, errors.New("event_id is required")
+	}
+	if event.OccurredAt.IsZero() {
+		event.OccurredAt = time.Now().UTC()
+	}
+	cmd, err := r.pool.Exec(ctx, `
+		INSERT INTO task_events (event_id, tenant_id, task_id, event_type, from_status, to_status, occurred_at, actor_user_id, payload)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+		ON CONFLICT (event_id) DO NOTHING
+	`, event.EventID, event.TenantID, event.TaskID, event.EventType, event.FromStatus, event.ToStatus, event.OccurredAt, event.ActorUserID, event.Payload)
+	if err != nil {
+		return false, err
+	}
+	return cmd.RowsAffected() > 0, nil
+}
+
+func (r *TasksRepo) CreateTaskWithEventAndOutbox(ctx context.Context, tenantID uuid.UUID, taskType string, status string, idempotencyKey string, payload []byte, createdBy *uuid.UUID, event models.TaskEvent, outbox *OutboxRepo, outboxEvent models.OutboxEvent) (models.Task, bool, models.TaskEvent, models.OutboxEvent, error) {
+	tx, err := r.pool.BeginTx(ctx, pgx.TxOptions{})
+	if err != nil {
+		return models.Task{}, false, models.TaskEvent{}, models.OutboxEvent{}, err
+	}
+	defer func() {
+		if err != nil {
+			_ = tx.Rollback(ctx)
+		}
+	}()
+
+	task, created, err := createTask(ctx, tx, tenantID, taskType, status, idempotencyKey, payload, createdBy)
+	if err != nil {
+		_ = tx.Rollback(ctx)
+		return models.Task{}, false, models.TaskEvent{}, models.OutboxEvent{}, err
+	}
+
+	if created {
+		event.TenantID = tenantID
+		event.TaskID = task.TaskID
+		event, err = appendTaskEvent(ctx, tx, event)
+		if err != nil {
+			_ = tx.Rollback(ctx)
+			return models.Task{}, false, models.TaskEvent{}, models.OutboxEvent{}, err
+		}
+		if outbox != nil {
+			outboxEvent.TenantID = tenantID
+			outboxEvent.AggregateID = task.TaskID
+			if len(outboxEvent.Payload) == 0 {
+				envelopePayload, _ := json.Marshal(events.Envelope{
+					EventID:       event.EventID,
+					TenantID:      tenantID,
+					OccurredAt:    event.OccurredAt,
+					AggregateType: outboxEvent.AggregateType,
+					AggregateID:   task.TaskID,
+					EventType:     event.EventType,
+					Payload:       json.RawMessage(event.Payload),
+				})
+				outboxEvent.Payload = envelopePayload
+			}
+			outboxEvent, err = outbox.Insert(ctx, tx, outboxEvent)
+			if err != nil {
+				_ = tx.Rollback(ctx)
+				return models.Task{}, false, models.TaskEvent{}, models.OutboxEvent{}, err
+			}
+		}
+	}
+
+	if err := tx.Commit(ctx); err != nil {
+		return models.Task{}, false, models.TaskEvent{}, models.OutboxEvent{}, err
+	}
+	return task, created, event, outboxEvent, nil
+}
+
+func (r *TasksRepo) TransitionTaskStatusWithOutbox(ctx context.Context, tenantID uuid.UUID, taskID uuid.UUID, toStatus string, eventType string, payload []byte, actorUserID *uuid.UUID, canTransition func(string, string) bool, eventTypeForTransition func(string, string) string, outbox *OutboxRepo, outboxEvent models.OutboxEvent) (models.Task, bool, models.OutboxEvent, error) {
+	tx, err := r.pool.BeginTx(ctx, pgx.TxOptions{})
+	if err != nil {
+		return models.Task{}, false, models.OutboxEvent{}, err
+	}
+	defer func() {
+		if err != nil {
+			_ = tx.Rollback(ctx)
+		}
+	}()
+
+	var task models.Task
+	err = tx.QueryRow(ctx, `
+		SELECT task_id, tenant_id, task_type, status, idempotency_key, payload, created_by_user_id, created_at, updated_at
+		FROM tasks
+		WHERE tenant_id = $1 AND task_id = $2
+		FOR UPDATE
+	`, tenantID, taskID).
+		Scan(&task.TaskID, &task.TenantID, &task.TaskType, &task.Status, &task.IdempotencyKey, &task.Payload, &task.CreatedByUserID, &task.CreatedAt, &task.UpdatedAt)
+	if err != nil {
+		return models.Task{}, false, models.OutboxEvent{}, err
+	}
+	if task.Status == toStatus {
+		if err := tx.Commit(ctx); err != nil {
+			return models.Task{}, false, models.OutboxEvent{}, err
+		}
+		return task, false, models.OutboxEvent{}, nil
+	}
+	if canTransition != nil && !canTransition(task.Status, toStatus) {
+		return models.Task{}, false, models.OutboxEvent{}, ErrInvalidTaskTransition
+	}
+	if eventType == "" && eventTypeForTransition != nil {
+		eventType = eventTypeForTransition(task.Status, toStatus)
+	}
+
+	now := time.Now().UTC()
+	_, err = tx.Exec(ctx, `
+		UPDATE tasks
+		SET status = $3, updated_at = $4
+		WHERE tenant_id = $1 AND task_id = $2
+	`, tenantID, taskID, toStatus, now)
+	if err != nil {
+		return models.Task{}, false, models.OutboxEvent{}, err
+	}
+
+	fromStatus := task.Status
+	task.Status = toStatus
+	task.UpdatedAt = now
+
+	event := models.TaskEvent{
+		TenantID:    tenantID,
+		TaskID:      taskID,
+		EventType:   eventType,
+		OccurredAt:  now,
+		ActorUserID: actorUserID,
+		Payload:     payload,
+	}
+	if fromStatus != "" {
+		event.FromStatus = &fromStatus
+	}
+	if toStatus != "" {
+		event.ToStatus = &toStatus
+	}
+	if _, err = appendTaskEvent(ctx, tx, event); err != nil {
+		return models.Task{}, false, models.OutboxEvent{}, err
+	}
+
+	if outbox != nil {
+		outboxEvent.TenantID = tenantID
+		outboxEvent.AggregateID = taskID
+		if len(outboxEvent.Payload) == 0 {
+			if outboxEvent.EventID == uuid.Nil {
+				outboxEvent.EventID = uuid.New()
+			}
+			envelopePayload, _ := json.Marshal(events.Envelope{
+				EventID:       outboxEvent.EventID,
+				TenantID:      tenantID,
+				OccurredAt:    now,
+				AggregateType: outboxEvent.AggregateType,
+				AggregateID:   taskID,
+				EventType:     eventType,
+				Payload:       json.RawMessage(payload),
+			})
+			outboxEvent.Payload = envelopePayload
+		}
+		outboxEvent, err = outbox.Insert(ctx, tx, outboxEvent)
+		if err != nil {
+			return models.Task{}, false, models.OutboxEvent{}, err
+		}
+	}
+
+	if err := tx.Commit(ctx); err != nil {
+		return models.Task{}, false, models.OutboxEvent{}, err
+	}
+	return task, true, outboxEvent, nil
 }
 
 func (r *TasksRepo) TransitionTaskStatus(ctx context.Context, tenantID uuid.UUID, taskID uuid.UUID, toStatus string, eventType string, payload []byte, actorUserID *uuid.UUID, canTransition func(string, string) bool, eventTypeForTransition func(string, string) string) (models.Task, bool, error) {
@@ -207,11 +378,20 @@ func appendTaskEvent(ctx context.Context, db DBTX, event models.TaskEvent) (mode
 	if event.OccurredAt.IsZero() {
 		event.OccurredAt = time.Now().UTC()
 	}
+	if event.EventID == uuid.Nil {
+		err := db.QueryRow(ctx, `
+			INSERT INTO task_events (tenant_id, task_id, event_type, from_status, to_status, occurred_at, actor_user_id, payload)
+			VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+			RETURNING event_id, tenant_id, task_id, event_type, from_status, to_status, occurred_at, actor_user_id, payload
+		`, event.TenantID, event.TaskID, event.EventType, event.FromStatus, event.ToStatus, event.OccurredAt, event.ActorUserID, event.Payload).
+			Scan(&event.EventID, &event.TenantID, &event.TaskID, &event.EventType, &event.FromStatus, &event.ToStatus, &event.OccurredAt, &event.ActorUserID, &event.Payload)
+		return event, err
+	}
 	err := db.QueryRow(ctx, `
-		INSERT INTO task_events (tenant_id, task_id, event_type, from_status, to_status, occurred_at, actor_user_id, payload)
-		VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+		INSERT INTO task_events (event_id, tenant_id, task_id, event_type, from_status, to_status, occurred_at, actor_user_id, payload)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
 		RETURNING event_id, tenant_id, task_id, event_type, from_status, to_status, occurred_at, actor_user_id, payload
-	`, event.TenantID, event.TaskID, event.EventType, event.FromStatus, event.ToStatus, event.OccurredAt, event.ActorUserID, event.Payload).
+	`, event.EventID, event.TenantID, event.TaskID, event.EventType, event.FromStatus, event.ToStatus, event.OccurredAt, event.ActorUserID, event.Payload).
 		Scan(&event.EventID, &event.TenantID, &event.TaskID, &event.EventType, &event.FromStatus, &event.ToStatus, &event.OccurredAt, &event.ActorUserID, &event.Payload)
 	return event, err
 }

@@ -1,0 +1,45 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: swarm-core
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: swarm-core
+  template:
+    metadata:
+      labels:
+        app: swarm-core
+    spec:
+      containers:
+        - name: core
+          image: swarm-core:latest
+          ports:
+            - containerPort: 8081
+          env:
+            - name: ENV
+              value: "prod"
+            - name: SERVICE_NAME
+              value: "core"
+            - name: HTTP_PORT
+              value: "8081"
+            - name: KAFKA_BROKERS
+              value: "kafka:9092"
+            - name: KAFKA_CLIENT_ID
+              value: "swarm-core"
+            - name: RMF_API_URL
+              value: "http://rmf-adapter:8000"
+            - name: RMF_ENABLED
+              value: "true"
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: swarm-core
+spec:
+  selector:
+    app: swarm-core
+  ports:
+    - port: 80
+      targetPort: 8081

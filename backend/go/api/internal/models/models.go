@@ -75,3 +75,66 @@ type AuditLog struct { // 审计日志模型
 	UserAgent    string     // UA 信息
 	Details      []byte     // 详情数据
 }
+
+type OutboxEvent struct {
+	EventID       uuid.UUID
+	TenantID      uuid.UUID
+	AggregateType string
+	AggregateID   uuid.UUID
+	Topic         string
+	Payload       []byte
+	Status        string
+	Attempts      int
+	NextRetryAt   *time.Time
+	LockedAt      *time.Time
+	LockedBy      *string
+	LastError     *string
+	CreatedAt     time.Time
+	UpdatedAt     time.Time
+	PublishedAt   *time.Time
+}
+
+type Zone struct {
+	ZoneID      uuid.UUID
+	TenantID    uuid.UUID
+	Name        string
+	Description *string
+	Geom        []byte
+	CreatedAt   time.Time
+}
+
+type ZoneCongestionSnapshot struct {
+	SnapshotID      uuid.UUID
+	TenantID        uuid.UUID
+	ZoneID          uuid.UUID
+	CongestionIndex float64
+	AvgSpeed        float64
+	QueueLength     float64
+	Risk            float64
+	Confidence      float64
+	UpdatedAt       time.Time
+}
+
+type CongestionAlert struct {
+	AlertID         uuid.UUID
+	TenantID        uuid.UUID
+	ZoneID          uuid.UUID
+	Level           string
+	Status          string
+	CongestionIndex float64
+	Risk            float64
+	Confidence      float64
+	DetectedAt      time.Time
+	Message         *string
+	Details         []byte
+}
+
+type CongestionAction struct {
+	ActionID   uuid.UUID
+	TenantID   uuid.UUID
+	AlertID    uuid.UUID
+	ActionType string
+	Status     string
+	Notes      *string
+	CreatedAt  time.Time
+}

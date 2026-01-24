@@ -14,12 +14,20 @@ import (
 	"os/signal"
 	"strconv"
 	"strings"
+	"swarm-agv-arm-scheduling-system/core/internal/rmf"
 	"swarm-agv-arm-scheduling-system/shared/config"
+	"swarm-agv-arm-scheduling-system/shared/events"
 	"swarm-agv-arm-scheduling-system/shared/httpx"
 	"swarm-agv-arm-scheduling-system/shared/logx"
+	"swarm-agv-arm-scheduling-system/shared/metricsx"
+	"swarm-agv-arm-scheduling-system/shared/mqx"
+	"swarm-agv-arm-scheduling-system/shared/observability"
 	"swarm-agv-arm-scheduling-system/shared/workflow"
 	"syscall"
 	"time"
+
+	"github.com/google/uuid"
+	"go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp"
 )
 
 type statusResponse struct {
@@ -46,10 +54,48 @@ func main() {
 	envName := cfg.Env
 	version := strings.TrimSpace(os.Getenv("VERSION"))
 	logger := logx.New(cfg.ServiceName, cfg.Env, version, cfg.LogLevel)
+	metricsx.Register()
+	var err error
+	var shutdownTracer func(context.Context) error
+	if cfg.OtelEnabled {
+		shutdownTracer, err = observability.InitTracer(context.Background(), observability.TracerConfig{
+			ServiceName: cfg.ServiceName,
+			Env:         cfg.Env,
+			Endpoint:    cfg.OtelEndpoint,
+			Insecure:    cfg.OtelInsecure,
+			SampleRatio: cfg.OtelSampleRatio,
+		})
+		if err != nil {
+			logger.Error(context.Background(), "otel_init_failed", "otel init failed",
+				slog.String("error_code", "FAILED_PRECONDITION"),
+				slog.String("error", err.Error()),
+			)
+		}
+	}
 
 	port, err := parsePort(strconv.Itoa(cfg.HTTPPort))
 	if err != nil {
 		log.Fatalf("invalid config: PORT=%q: %v", os.Getenv("PORT"), err)
+	}
+
+	var rmfClient *rmf.Client
+	if cfg.RMFEnabled && cfg.RMFAPIURL != "" {
+		client, err := rmf.NewClient(cfg.RMFAPIURL, cfg.RMFAPIToken, 5*time.Second)
+		if err != nil {
+			readyProblems = append(readyProblems, config.Problem{Field: "RMF_API_URL", Message: "failed to initialize rmf client"})
+		} else {
+			rmfClient = client
+		}
+	}
+
+	var kafkaProducer *mqx.Producer
+	if len(cfg.KafkaBrokers) > 0 {
+		producer, err := mqx.NewProducer(cfg)
+		if err != nil {
+			readyProblems = append(readyProblems, config.Problem{Field: "KAFKA_BROKERS", Message: "failed to initialize kafka producer"})
+		} else {
+			kafkaProducer = producer
+		}
 	}
 
 	mux := http.NewServeMux()
@@ -80,6 +126,74 @@ func main() {
 			Version: version,
 		})
 	})
+	mux.Handle("GET /metrics", metricsx.Handler())
+
+	mux.HandleFunc("POST /api/v1/rmf/tasks", func(w http.ResponseWriter, r *http.Request) {
+		if rmfClient == nil {
+			httpx.WriteError(w, r, http.StatusFailedDependency, "FAILED_PRECONDITION", "rmf not configured", nil)
+			return
+		}
+		var req rmf.TaskRequest
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			httpx.WriteError(w, r, http.StatusBadRequest, "INVALID_ARGUMENT", "invalid json body", nil)
+			return
+		}
+		resp, err := rmfClient.CreateTask(r.Context(), req)
+		if err != nil {
+			httpx.WriteError(w, r, http.StatusBadGateway, "INTERNAL_ERROR", "rmf create failed", nil)
+			return
+		}
+		httpx.WriteJSON(w, http.StatusAccepted, resp)
+	})
+
+	mux.HandleFunc("POST /api/v1/rmf/tasks/{task_id}/cancel", func(w http.ResponseWriter, r *http.Request) {
+		if rmfClient == nil {
+			httpx.WriteError(w, r, http.StatusFailedDependency, "FAILED_PRECONDITION", "rmf not configured", nil)
+			return
+		}
+		taskID := strings.TrimSpace(r.PathValue("task_id"))
+		if taskID == "" {
+			httpx.WriteError(w, r, http.StatusBadRequest, "INVALID_ARGUMENT", "missing task_id", nil)
+			return
+		}
+		resp, err := rmfClient.CancelTask(r.Context(), taskID)
+		if err != nil {
+			httpx.WriteError(w, r, http.StatusBadGateway, "INTERNAL_ERROR", "rmf cancel failed", nil)
+			return
+		}
+		httpx.WriteJSON(w, http.StatusOK, resp)
+	})
+
+	mux.HandleFunc("POST /api/v1/rmf/status", func(w http.ResponseWriter, r *http.Request) {
+		if kafkaProducer == nil {
+			httpx.WriteError(w, r, http.StatusFailedDependency, "FAILED_PRECONDITION", "kafka not configured", nil)
+			return
+		}
+		var req rmfStatusRequest
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			httpx.WriteError(w, r, http.StatusBadRequest, "INVALID_ARGUMENT", "invalid json body", nil)
+			return
+		}
+		eventID := uuid.New()
+		payload, _ := json.Marshal(req)
+		envelope, _ := json.Marshal(events.Envelope{
+			EventID:       eventID,
+			TenantID:      req.TenantID,
+			OccurredAt:    time.Now().UTC(),
+			AggregateType: "task",
+			AggregateID:   req.TaskID,
+			EventType:     "rmf_status",
+			Payload:       payload,
+		})
+		if err := kafkaProducer.Publish(r.Context(), events.TopicTaskEvents, []byte(req.TaskID.String()), envelope, map[string]string{
+			"tenant_id": req.TenantID.String(),
+			"event_id":  eventID.String(),
+		}); err != nil {
+			httpx.WriteError(w, r, http.StatusInternalServerError, "INTERNAL_ERROR", "failed to publish status", nil)
+			return
+		}
+		httpx.WriteJSON(w, http.StatusAccepted, map[string]any{"event_id": eventID})
+	})
 
 	notFound := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		httpx.WriteError(w, r, http.StatusNotFound, "NOT_FOUND", "route not found", nil)
@@ -88,7 +202,9 @@ func main() {
 	handler = httpx.WithTimeout(cfg.RequestTimeout, handler)
 	handler = httpx.WithRequestID(handler)
 	handler = httpx.WithRecover(logger, handler)
-	handler = httpx.WithRequestLog(logger, httpx.RequestLogOptions{SkipPaths: map[string]bool{"/healthz": true}}, handler)
+	handler = metricsx.Instrument(handler)
+	handler = httpx.WithRequestLog(logger, httpx.RequestLogOptions{SkipPaths: map[string]bool{"/healthz": true, "/metrics": true}}, handler)
+	handler = otelhttp.NewHandler(handler, "http")
 
 	server := &http.Server{
 		Addr:              net.JoinHostPort("", strconv.Itoa(port)),
@@ -129,6 +245,12 @@ func main() {
 	defer cancel()
 	if err := server.Shutdown(shutdownCtx); err != nil {
 		logger.Error(context.Background(), "shutdown_failed", "shutdown failed", slog.String("error_code", "INTERNAL_ERROR"), slog.String("error", err.Error()))
+	}
+	if kafkaProducer != nil {
+		_ = kafkaProducer.Close()
+	}
+	if shutdownTracer != nil {
+		_ = shutdownTracer(context.Background())
 	}
 	logger.Info(context.Background(), "service_stop", "service stopped")
 }
@@ -212,6 +334,13 @@ func newRequestID() string {
 		return strconv.FormatInt(time.Now().UnixNano(), 10)
 	}
 	return hex.EncodeToString(b[:])
+}
+
+type rmfStatusRequest struct {
+	TenantID uuid.UUID `json:"tenant_id"`
+	TaskID   uuid.UUID `json:"task_id"`
+	Status   string    `json:"status"`
+	RobotID  string    `json:"robot_id,omitempty"`
 }
 
 type loggingResponseWriter struct {

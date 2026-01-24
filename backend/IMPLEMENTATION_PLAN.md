@@ -382,47 +382,108 @@
 - [x] 为事件流做准备：定义 task/robot 领域事件的字段集合（event_id/tenant_id/occurred_at 等）
 
 #### Sprint 5（02/24–03/09）：Kafka 基座 + Topic/Schema 定版 + 最小生产消费链路
-- Topic 定版：`robot.status`、`task.events`、`alerts`、`scheduler.decisions`、`congestion.metrics`、`congestion.predictions`
-- Go shared：Kafka Producer/Consumer 封装（含重试、consumer group、可观测字段）
-- 最小消费者：`task.events` 入库（或落审计表），并验证消费幂等策略
+- [x] Topic 定版：`robot.status`、`task.events`、`alerts`、`scheduler.decisions`、`congestion.metrics`、`congestion.predictions`
+- [x] Go shared：Kafka Producer/Consumer 封装（含重试、consumer group、可观测字段）
+- [x] 最小消费者：`task.events` 入库（或落审计表），并验证消费幂等策略
 
 #### Sprint 6（03/10–03/23）：Outbox + Asynq（保证一致性与可恢复）
-- migrations：增加 `outbox_events`（建议字段：event_id、aggregate_type、aggregate_id、topic、payload、status、attempts、next_retry_at）
-- 写入与业务事务绑定：任务创建/状态流转/调度决策均写 outbox
-- Asynq worker：扫描/锁定 outbox → 投递 Kafka → 标记完成；失败重试/死信
+- [x] migrations：增加 `outbox_events`（建议字段：event_id、aggregate_type、aggregate_id、topic、payload、status、attempts、next_retry_at）
+- [x] 写入与业务事务绑定：任务创建/状态流转/调度决策均写 outbox
+- [x] Asynq worker：扫描/锁定 outbox → 投递 Kafka → 标记完成；失败重试/死信
 
 #### Sprint 7（03/24–04/06）：Redis 缓存 + 分布式锁（调度并发控制）
-- Redis 缓存：机器人最新状态视图、任务视图（读优化）
-- 分布式锁：任务分配/重规划互斥；锁粒度与超时策略定版
-- 为实时推送做准备：状态/任务视图的订阅维度（tenant/warehouse/robot_id）
+- [x] Redis 缓存：机器人最新状态视图、任务视图（读优化）
+- [x] 分布式锁：任务分配/重规划互斥；锁粒度与超时策略定版
+- [x] 为实时推送做准备：状态/任务视图的订阅维度（tenant/warehouse/robot_id）
 
 #### Sprint 8（04/07–04/20）：InfluxDB 落地（写入/保留/查询）+ 状态管线迁移
-- InfluxDB：bucket/retention policy、measurement/tags/fields 设计定版（注意 tag 基数）
-- 写入管线：机器人高频状态写入 Influx（line protocol/SDK）+ Postgres 保留最新快照
-- 扩展时序模型：落地 `ZoneCongestionTimeSeries`（区域/路段拥堵指数、均速、排队长度、risk/confidence）
-- 查询 API：按 `robot_id` + time range 查询轨迹/电量等时序；按 `zone_id` + time range 查询拥堵时序（含分页/下采样策略）
+- [x] InfluxDB：bucket/retention policy、measurement/tags/fields 设计定版（注意 tag 基数）
+- [x] 写入管线：机器人高频状态写入 Influx（line protocol/SDK）+ Postgres 保留最新快照
+- [x] 扩展时序模型：落地 `ZoneCongestionTimeSeries`（区域/路段拥堵指数、均速、排队长度、risk/confidence）
+- [x] 查询 API：按 `robot_id` + time range 查询轨迹/电量等时序；按 `zone_id` + time range 查询拥堵时序（含分页/下采样策略）
 
 #### Sprint 9（04/21–05/04）：仓内拥堵热点（MVP）+ 预警闭环 + 调度联动
-- 数据模型：区域/路段实体（PostGIS）+ 拥堵预警事件表 + 人工处置/回滚记录（为“预测-预警-处置-复盘”闭环留口）
-- 特征与指数：从 `robot.status`/`task.events` 做窗口聚合，产出 `congestion_index`/`risk_score`/`confidence`（先 Go worker/消费者实现，后续可替换 Flink）
-- 预警引擎：L1/L2/L3 阈值 + 迟滞/冷却时间，输出到 `alerts`（或 `congestion.*`）并记录入库
-- API/实时：`GET /api/v1/congestion/hotspots?horizon_seconds=...`（先支持 0/短窗）+ WS 推送 `congestion_alert`/`congestion_heatmap_update`
-- 调度联动：根据拥堵指数动态调整路段成本/限流参数，触发重规划（先最小可用 + 可观测）
+- [x] 数据模型：区域/路段实体（PostGIS）+ 拥堵预警事件表 + 人工处置/回滚记录（为“预测-预警-处置-复盘”闭环留口）
+- [x] 特征与指数：从 `robot.status`/`task.events` 做窗口聚合，产出 `congestion_index`/`risk_score`/`confidence`（先 Go worker/消费者实现，后续可替换 Flink）
+- [x] 预警引擎：L1/L2/L3 阈值 + 迟滞/冷却时间，输出到 `alerts`（或 `congestion.*`）并记录入库
+- [x] API/实时：`GET /api/v1/congestion/hotspots?horizon_seconds=...`（先支持 0/短窗）+ WS 推送 `congestion_alert`/`congestion_heatmap_update`
+- [x] 调度联动：根据拥堵指数动态调整路段成本/限流参数，触发重规划（先最小可用 + 可观测）
 
 #### Sprint 10（05/05–05/18）：OpenRMF 深度集成（真实对接跑通）
-- core `rmf` 适配层实现：任务下发/取消、状态回传、事件映射（与内部 task/workflow 对齐）
-- 调度与 RMF 闭环：冲突检测、重规划触发条件（先做关键触发与可观测）
-- 验收：在 RMF 环境（仿真或测试场）跑通端到端任务执行与状态同步
+- [x] core `rmf` 适配层实现：任务下发/取消、状态回传、事件映射（与内部 task/workflow 对齐）
+- [x] 调度与 RMF 闭环：冲突检测、重规划触发条件（先做关键触发与可观测）
+- [x] 验收：在 RMF 环境（仿真或测试场）跑通端到端任务执行与状态同步
 
 #### Sprint 11（05/19–06/01）：Python 算法服务对接 + 拥堵预测（1/5/15min）+ 上线收口
-- `backend/proto/` 契约定版：Go→Python gRPC/HTTP（含超时/重试/熔断）；新增 `PredictCongestionHotspots`/`suggested_actions` 等字段；feature flag 控制启用/回退
-- 在线推理服务：FastAPI（可选 Ray Serve）读取 Redis/Influx/PostGIS 特征，输出热点热力图与预警建议（1/5/15min 滚动预测）
-- 实时推送：WS/SSE 推送机器人状态、任务进度、告警（含拥堵预警）（按 tenant/robot_id/warehouse 订阅）
-- 观测收口：Prometheus 指标（HTTP、Kafka lag、Asynq 堆积、Influx 写入失败、调度耗时、推理延迟/吞吐/命中率）+ Tracing（HTTP/gRPC/Kafka）
-- 部署收口：Dockerfile + k8s manifests（Deployment/Service/HPA/Config/Secret）+ 运行手册
-- 测试收口：状态机/鉴权单测；DB/Kafka/Redis/Asynq/Influx 最小集成测试（可用 docker-compose 或 testcontainers）
+- [x] `backend/proto/` 契约定版：Go→Python gRPC/HTTP（含超时/重试/熔断）；新增 `PredictCongestionHotspots`/`suggested_actions` 等字段；feature flag 控制启用/回退
+- [x] 在线推理服务：FastAPI（可选 Ray Serve）读取 Redis/Influx/PostGIS 特征，输出热点热力图与预警建议（1/5/15min 滚动预测）
+- [x] 实时推送：WS/SSE 推送机器人状态、任务进度、告警（含拥堵预警）（按 tenant/robot_id/warehouse 订阅）
+- [x] 观测收口：Prometheus 指标（HTTP、Kafka lag、Asynq 堆积、Influx 写入失败、调度耗时、推理延迟/吞吐/命中率）+ Tracing（HTTP/gRPC/Kafka）
+- [x] 部署收口：Dockerfile + k8s manifests（Deployment/Service/HPA/Config/Secret）+ 运行手册
+- [x] 测试收口：状态机/鉴权单测；DB/Kafka/Redis/Asynq/Influx 最小集成测试（可用 docker-compose 或 testcontainers）
 
 #### 缓冲（06/02–06/14）：联调、压测、故障演练与参数调优
 - 故障演练：Kafka/Redis/Influx/DB 断连恢复，验证 outbox+重试+幂等
 - 压测：核心 API、WS 连接、调度决策耗时；针对瓶颈做参数调优与限流策略校准
 - 效果调优：拥堵预警阈值/迟滞/冷却时间校准；误报/漏报复盘与回放验证
+
+---
+
+## 19. 10 万级规模扩展路线图（新增）
+
+> 目标：在不破坏现有功能的前提下，完成“多集群分区 + 分层调度 + 流式计算 + 边缘网关 + 数字孪生仿真”能力，支撑 10 万级 AGV 规模与高频状态流。
+
+### 19.1 规模目标（需业务确认的硬指标）
+- 规模基线：AGV 10 万；在线率 ≥ 95%；状态频率 ≥ 1Hz（可分层）
+- 时延目标：关键控制指令 P99 < 200ms；调度决策 P99 < 1s；全链路可观测
+- 地图规模：区域/路段/节点数量级；多仓/多园区
+- 峰值与降级：流量激增或局部拥堵时，能按区域/租户隔离与降级
+
+### 19.2 架构演进（从单集群到多集群分区）
+- 多集群分区：按仓/区域/租户分片（Cluster A/B/C），主路由按 `tenant_id + warehouse_id`
+- 控制面与数据面拆分：全局控制面只存“索引 + 元数据”；数据面承载实时流
+- 事件流按 key 分区：`robot_id/zone_id/warehouse_id` 做 topic key；热点隔离与再平衡策略定版
+- 跨集群事件桥接：关键事件做双写或桥接（MirrorMaker2 或自研 bridge）
+- 数据一致性策略：跨集群只保证最终一致，强一致仅在局部集群内
+
+### 19.3 调度层升级（分层调度 + 增量重规划）
+- 分层调度：全局粗分配（跨仓/跨区域）+ 局部细排程（单仓实时）
+- 批量决策：对批量任务做合并调度，减少全量重算
+- 增量重规划：基于局部变化与拥堵事件触发，避免全图重算
+- 冲突检测分区化：按区域/路段分区执行，减少全域锁
+
+### 19.4 时序与状态（流式计算 + 分层存储）
+- 流式计算：引入 Flink/Kafka Streams 做窗口聚合与特征生成
+- 状态分层：热缓存（Redis）+ 温存储（Postgres 最新快照）+ 冷存储（Influx 历史）
+- 采样与降频：按 `robot_id`/`priority` 实施动态降频
+- 事件回放能力：支持回放指定时间窗（用于仿真/调参）
+
+### 19.5 通信与控制（边缘网关 + QoS）
+- 边缘代理：设备侧网关聚合状态上报/控制指令，下沉认证与限流
+- 控制通道 QoS：指令通道优先级（控制 > 任务 > 监控）
+- 断连自治：网关具备短时自主策略与离线缓冲
+- 轻量协议：MQTT/GRPC bidi 组合，减少中心压力
+
+### 19.6 可观测与容量（SLO + 压测模型）
+- 端到端 tracing：覆盖 API→调度→事件流→设备→回执全链路
+- 压测模型：Kafka/Redis/Postgres/Influx 组合压测；定义并固化 SLO
+- 弹性策略：HPA + 队列深度 + Lag 联动扩缩容
+- 故障演练：按“单仓/单集群/跨集群”进行分级演练
+
+### 19.7 数字孪生（仿真引擎 + 实时对齐）
+- 引擎选型：RMF sim / Gazebo / Unity / Isaac Sim（二选一或多栈）
+- 实时对齐：仿真与真实状态以 `robot_id` 对齐，支持漂移检测与纠偏
+- 回放与调参：基于历史事件流回放，支持参数 A/B
+- 输出闭环：仿真结果回写特征与预警策略
+
+### 19.8 最小可行验证（MVP）清单
+- 1 个多集群分区：按 `warehouse_id` 分片 + 统一路由网关
+- 1 条分层调度链路：全局粗分配 + 单仓细排程
+- 1 条流式特征链路：Flink/Kafka Streams 产出 `congestion_index`
+- 1 套边缘网关：支持 1 万台设备聚合（压测）
+- 1 套仿真闭环：仿真引擎 + 回放 + 参数校准
+
+### 19.9 验收标准
+- 10 万级状态流压测通过（峰值 QPS 与 Kafka Lag 满足目标）
+- 调度 P99 与控制通道 P99 达标（见 19.1）
+- 仿真回放与真实数据对齐误差可度量并可调参

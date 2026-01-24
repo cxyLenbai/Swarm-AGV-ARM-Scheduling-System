@@ -25,7 +25,7 @@ func (m RateLimitMiddleware) Wrap(next http.Handler) http.Handler {
 			next.ServeHTTP(w, r)
 			return
 		}
-		key := clientIP(r)
+		key := rateLimitClientIP(r)
 		if key == "" {
 			key = "unknown"
 		}
@@ -108,7 +108,7 @@ func (l *IPRateLimiter) cleanup(now time.Time) {
 	}
 }
 
-func clientIP(r *http.Request) string {
+func rateLimitClientIP(r *http.Request) string {
 	if v := strings.TrimSpace(r.Header.Get("X-Forwarded-For")); v != "" {
 		parts := strings.Split(v, ",")
 		if len(parts) > 0 {

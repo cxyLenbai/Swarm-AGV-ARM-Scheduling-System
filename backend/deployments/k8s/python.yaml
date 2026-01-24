@@ -1,0 +1,37 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: swarm-python
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: swarm-python
+  template:
+    metadata:
+      labels:
+        app: swarm-python
+    spec:
+      containers:
+        - name: python
+          image: swarm-python:latest
+          ports:
+            - containerPort: 8000
+          env:
+            - name: ENV
+              value: "prod"
+            - name: SERVICE_NAME
+              value: "python-services"
+            - name: HTTP_PORT
+              value: "8000"
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: swarm-python
+spec:
+  selector:
+    app: swarm-python
+  ports:
+    - port: 80
+      targetPort: 8000

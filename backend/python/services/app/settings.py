@@ -25,6 +25,13 @@ class AppSettings:
     DB_CONN_MAX_IDLE_SECONDS: int
     DB_CONN_MAX_LIFETIME_SECONDS: int
     AUDIT_ENABLED: bool
+    REDIS_ADDR: Optional[str]
+    REDIS_PASSWORD: Optional[str]
+    REDIS_DB: int
+    INFLUX_URL: Optional[str]
+    INFLUX_TOKEN: Optional[str]
+    INFLUX_ORG: Optional[str]
+    INFLUX_BUCKET: Optional[str]
 
 
 def _find_repo_root(start: Path) -> Optional[Path]:
@@ -90,6 +97,13 @@ def load_settings(service_name_default: str = "services", http_port_default: int
     db_conn_max_idle_seconds = int(file_data.get("DB_CONN_MAX_IDLE_SECONDS") or 300)
     db_conn_max_lifetime_seconds = int(file_data.get("DB_CONN_MAX_LIFETIME_SECONDS") or 1800)
     audit_enabled = str(file_data.get("AUDIT_ENABLED") or "").strip().lower() in ("1", "true", "yes", "y")
+    redis_addr = str(file_data.get("REDIS_ADDR") or "").strip() or None
+    redis_password = str(file_data.get("REDIS_PASSWORD") or "").strip() or None
+    redis_db = int(file_data.get("REDIS_DB") or 0)
+    influx_url = str(file_data.get("INFLUX_URL") or "").strip() or None
+    influx_token = str(file_data.get("INFLUX_TOKEN") or "").strip() or None
+    influx_org = str(file_data.get("INFLUX_ORG") or "").strip() or None
+    influx_bucket = str(file_data.get("INFLUX_BUCKET") or "").strip() or None
 
     if v := os.getenv("SERVICE_NAME", "").strip():
         service_name = v
@@ -156,6 +170,23 @@ def load_settings(service_name_default: str = "services", http_port_default: int
             problems.append({"field": "DB_CONN_MAX_LIFETIME_SECONDS", "message": "DB_CONN_MAX_LIFETIME_SECONDS must be an integer"})
     if v := os.getenv("AUDIT_ENABLED", "").strip():
         audit_enabled = v.strip().lower() in ("1", "true", "yes", "y")
+    if v := os.getenv("REDIS_ADDR", "").strip():
+        redis_addr = v
+    if v := os.getenv("REDIS_PASSWORD", "").strip():
+        redis_password = v
+    if v := os.getenv("REDIS_DB", "").strip():
+        try:
+            redis_db = int(v)
+        except ValueError:
+            problems.append({"field": "REDIS_DB", "message": "REDIS_DB must be an integer"})
+    if v := os.getenv("INFLUX_URL", "").strip():
+        influx_url = v
+    if v := os.getenv("INFLUX_TOKEN", "").strip():
+        influx_token = v
+    if v := os.getenv("INFLUX_ORG", "").strip():
+        influx_org = v
+    if v := os.getenv("INFLUX_BUCKET", "").strip():
+        influx_bucket = v
 
     if not env_name:
         problems.append({"field": "ENV", "message": "ENV is required"})
@@ -190,6 +221,9 @@ def load_settings(service_name_default: str = "services", http_port_default: int
     if db_conn_max_lifetime_seconds <= 0:
         problems.append({"field": "DB_CONN_MAX_LIFETIME_SECONDS", "message": "DB_CONN_MAX_LIFETIME_SECONDS must be > 0"})
         db_conn_max_lifetime_seconds = 1800
+    if redis_db < 0:
+        problems.append({"field": "REDIS_DB", "message": "REDIS_DB must be >= 0"})
+        redis_db = 0
 
     return (
         AppSettings(
@@ -211,6 +245,13 @@ def load_settings(service_name_default: str = "services", http_port_default: int
             DB_CONN_MAX_IDLE_SECONDS=db_conn_max_idle_seconds,
             DB_CONN_MAX_LIFETIME_SECONDS=db_conn_max_lifetime_seconds,
             AUDIT_ENABLED=audit_enabled,
+            REDIS_ADDR=redis_addr,
+            REDIS_PASSWORD=redis_password,
+            REDIS_DB=redis_db,
+            INFLUX_URL=influx_url,
+            INFLUX_TOKEN=influx_token,
+            INFLUX_ORG=influx_org,
+            INFLUX_BUCKET=influx_bucket,
         ),
         problems,
     )

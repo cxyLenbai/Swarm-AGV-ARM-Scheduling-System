@@ -1,0 +1,63 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: swarm-api
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: swarm-api
+  template:
+    metadata:
+      labels:
+        app: swarm-api
+    spec:
+      containers:
+        - name: api
+          image: swarm-api:latest
+          ports:
+            - containerPort: 8080
+          env:
+            - name: ENV
+              value: "prod"
+            - name: SERVICE_NAME
+              value: "api"
+            - name: HTTP_PORT
+              value: "8080"
+            - name: DATABASE_URL
+              valueFrom:
+                secretKeyRef:
+                  name: swarm-secrets
+                  key: database_url
+            - name: KAFKA_BROKERS
+              value: "kafka:9092"
+            - name: KAFKA_CONSUMER_GROUP
+              value: "swarm-api"
+            - name: REDIS_ADDR
+              value: "redis:6379"
+            - name: INFLUX_URL
+              value: "http://influxdb:8086"
+            - name: INFLUX_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: swarm-secrets
+                  key: influx_token
+            - name: INFLUX_ORG
+              value: "swarm"
+            - name: INFLUX_BUCKET
+              value: "swarm_robot_status"
+            - name: AI_SERVICE_URL
+              value: "http://swarm-python:8000"
+            - name: AI_ENABLED
+              value: "true"
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: swarm-api
+spec:
+  selector:
+    app: swarm-api
+  ports:
+    - port: 80
+      targetPort: 8080
