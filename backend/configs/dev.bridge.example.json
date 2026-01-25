@@ -1,0 +1,13 @@
+{
+  "ENV": "dev",
+  "SERVICE_NAME": "bridge",
+  "HTTP_PORT": 8091,
+  "LOG_LEVEL": "info",
+  "REQUEST_TIMEOUT_MS": 30000,
+  "BRIDGE_SOURCE_BROKERS": "localhost:9092",
+  "BRIDGE_TARGET_BROKERS": "localhost:9093",
+  "BRIDGE_TOPICS": "robot.status,task.events,alerts,scheduler.decisions",
+  "BRIDGE_GROUP_ID": "swarm-bridge",
+  "BRIDGE_CLIENT_ID": "swarm-bridge",
+  "BRIDGE_MAX_BYTES": 10000000
+}

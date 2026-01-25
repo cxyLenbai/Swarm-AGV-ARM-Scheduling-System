@@ -12,6 +12,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"sort"
 	"strconv"
 	"strings"
 	"swarm-agv-arm-scheduling-system/core/internal/rmf"
@@ -195,6 +196,49 @@ func main() {
 		httpx.WriteJSON(w, http.StatusAccepted, map[string]any{"event_id": eventID})
 	})
 
+	mux.HandleFunc("POST /api/v1/scheduler/global-assign", func(w http.ResponseWriter, r *http.Request) {
+		start := time.Now()
+		var req globalAssignRequest
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			httpx.WriteError(w, r, http.StatusBadRequest, "INVALID_ARGUMENT", "invalid json body", nil)
+			return
+		}
+		assignments, loads, err := globalAssign(req)
+		if err != nil {
+			httpx.WriteError(w, r, http.StatusBadRequest, "INVALID_ARGUMENT", err.Error(), nil)
+			return
+		}
+		resp := globalAssignResponse{
+			TenantID:       req.TenantID,
+			Assignments:    assignments,
+			WarehouseLoads: loads,
+		}
+		if kafkaProducer != nil {
+			_ = publishDecision(r.Context(), kafkaProducer, req.TenantID, "global_assignment", resp)
+		}
+		metricsx.ObserveSchedulerDecisionLatency(time.Since(start))
+		httpx.WriteJSON(w, http.StatusOK, resp)
+	})
+
+	mux.HandleFunc("POST /api/v1/scheduler/local-schedule", func(w http.ResponseWriter, r *http.Request) {
+		start := time.Now()
+		var req localScheduleRequest
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			httpx.WriteError(w, r, http.StatusBadRequest, "INVALID_ARGUMENT", "invalid json body", nil)
+			return
+		}
+		resp, err := localSchedule(req)
+		if err != nil {
+			httpx.WriteError(w, r, http.StatusBadRequest, "INVALID_ARGUMENT", err.Error(), nil)
+			return
+		}
+		if kafkaProducer != nil {
+			_ = publishDecision(r.Context(), kafkaProducer, req.TenantID, "local_schedule", resp)
+		}
+		metricsx.ObserveSchedulerDecisionLatency(time.Since(start))
+		httpx.WriteJSON(w, http.StatusOK, resp)
+	})
+
 	notFound := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		httpx.WriteError(w, r, http.StatusNotFound, "NOT_FOUND", "route not found", nil)
 	})
@@ -341,6 +385,192 @@ type rmfStatusRequest struct {
 	TaskID   uuid.UUID `json:"task_id"`
 	Status   string    `json:"status"`
 	RobotID  string    `json:"robot_id,omitempty"`
+}
+
+type globalAssignRequest struct {
+	TenantID uuid.UUID         `json:"tenant_id"`
+	Tasks    []globalTaskInput `json:"tasks"`
+}
+
+type globalTaskInput struct {
+	TaskID              string     `json:"task_id"`
+	WarehouseID         string     `json:"warehouse_id,omitempty"`
+	CandidateWarehouses []string   `json:"candidate_warehouses,omitempty"`
+	Priority            int        `json:"priority,omitempty"`
+	CreatedAt           *time.Time `json:"created_at,omitempty"`
+}
+
+type taskAssignment struct {
+	TaskID      string `json:"task_id"`
+	WarehouseID string `json:"warehouse_id"`
+}
+
+type globalAssignResponse struct {
+	TenantID       uuid.UUID        `json:"tenant_id"`
+	Assignments    []taskAssignment `json:"assignments"`
+	WarehouseLoads map[string]int   `json:"warehouse_loads"`
+}
+
+type localScheduleRequest struct {
+	TenantID    uuid.UUID        `json:"tenant_id"`
+	WarehouseID string           `json:"warehouse_id"`
+	Tasks       []localTaskInput `json:"tasks"`
+	Robots      []robotInput     `json:"robots,omitempty"`
+}
+
+type localTaskInput struct {
+	TaskID    string     `json:"task_id"`
+	Priority  int        `json:"priority,omitempty"`
+	CreatedAt *time.Time `json:"created_at,omitempty"`
+}
+
+type robotInput struct {
+	RobotID string `json:"robot_id"`
+}
+
+type scheduledItem struct {
+	TaskID   string `json:"task_id"`
+	RobotID  string `json:"robot_id,omitempty"`
+	Sequence int    `json:"sequence"`
+}
+
+type localScheduleResponse struct {
+	TenantID    uuid.UUID       `json:"tenant_id"`
+	WarehouseID string          `json:"warehouse_id"`
+	Schedule    []scheduledItem `json:"schedule"`
+}
+
+func globalAssign(req globalAssignRequest) ([]taskAssignment, map[string]int, error) {
+	if req.TenantID == uuid.Nil {
+		return nil, nil, errors.New("tenant_id is required")
+	}
+	if len(req.Tasks) == 0 {
+		return nil, nil, errors.New("tasks is required")
+	}
+	loads := map[string]int{}
+	assignments := make([]taskAssignment, 0, len(req.Tasks))
+	for _, task := range req.Tasks {
+		taskID := strings.TrimSpace(task.TaskID)
+		if taskID == "" {
+			return nil, nil, errors.New("task_id is required")
+		}
+		warehouseID := strings.TrimSpace(task.WarehouseID)
+		if warehouseID == "" {
+			if len(task.CandidateWarehouses) == 0 {
+				return nil, nil, errors.New("warehouse_id or candidate_warehouses is required")
+			}
+			warehouseID = chooseWarehouse(task.CandidateWarehouses, loads)
+		}
+		loads[warehouseID]++
+		assignments = append(assignments, taskAssignment{
+			TaskID:      taskID,
+			WarehouseID: warehouseID,
+		})
+	}
+	return assignments, loads, nil
+}
+
+func chooseWarehouse(candidates []string, loads map[string]int) string {
+	var chosen string
+	minLoad := int(^uint(0) >> 1)
+	for _, candidate := range candidates {
+		candidate = strings.TrimSpace(candidate)
+		if candidate == "" {
+			continue
+		}
+		load := loads[candidate]
+		if chosen == "" || load < minLoad {
+			chosen = candidate
+			minLoad = load
+		}
+	}
+	return chosen
+}
+
+func localSchedule(req localScheduleRequest) (localScheduleResponse, error) {
+	if req.TenantID == uuid.Nil {
+		return localScheduleResponse{}, errors.New("tenant_id is required")
+	}
+	warehouseID := strings.TrimSpace(req.WarehouseID)
+	if warehouseID == "" {
+		return localScheduleResponse{}, errors.New("warehouse_id is required")
+	}
+	if len(req.Tasks) == 0 {
+		return localScheduleResponse{}, errors.New("tasks is required")
+	}
+	tasks := make([]localTaskInput, 0, len(req.Tasks))
+	for _, t := range req.Tasks {
+		if strings.TrimSpace(t.TaskID) == "" {
+			return localScheduleResponse{}, errors.New("task_id is required")
+		}
+		tasks = append(tasks, t)
+	}
+	sort.SliceStable(tasks, func(i, j int) bool {
+		if tasks[i].Priority != tasks[j].Priority {
+			return tasks[i].Priority > tasks[j].Priority
+		}
+		ti := time.Time{}
+		tj := time.Time{}
+		if tasks[i].CreatedAt != nil {
+			ti = tasks[i].CreatedAt.UTC()
+		}
+		if tasks[j].CreatedAt != nil {
+			tj = tasks[j].CreatedAt.UTC()
+		}
+		return ti.Before(tj)
+	})
+
+	robots := make([]string, 0, len(req.Robots))
+	for _, robot := range req.Robots {
+		if id := strings.TrimSpace(robot.RobotID); id != "" {
+			robots = append(robots, id)
+		}
+	}
+	schedule := make([]scheduledItem, 0, len(tasks))
+	for idx, task := range tasks {
+		item := scheduledItem{
+			TaskID:   strings.TrimSpace(task.TaskID),
+			Sequence: idx + 1,
+		}
+		if len(robots) > 0 {
+			item.RobotID = robots[idx%len(robots)]
+		}
+		schedule = append(schedule, item)
+	}
+	return localScheduleResponse{
+		TenantID:    req.TenantID,
+		WarehouseID: warehouseID,
+		Schedule:    schedule,
+	}, nil
+}
+
+func publishDecision(ctx context.Context, producer *mqx.Producer, tenantID uuid.UUID, decisionType string, payload any) error {
+	if producer == nil || tenantID == uuid.Nil {
+		return nil
+	}
+	body, err := json.Marshal(payload)
+	if err != nil {
+		return err
+	}
+	eventID := uuid.New()
+	envelope, err := json.Marshal(events.Envelope{
+		EventID:       eventID,
+		TenantID:      tenantID,
+		OccurredAt:    time.Now().UTC(),
+		AggregateType: "scheduler",
+		AggregateID:   uuid.New(),
+		EventType:     decisionType,
+		Payload:       body,
+	})
+	if err != nil {
+		return err
+	}
+	headers := map[string]string{
+		"tenant_id":     tenantID.String(),
+		"event_id":      eventID.String(),
+		"decision_type": decisionType,
+	}
+	return producer.Publish(ctx, events.TopicSchedulerDecisions, []byte(tenantID.String()), envelope, headers)
 }
 
 type loggingResponseWriter struct {

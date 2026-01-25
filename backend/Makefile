@@ -1,10 +1,12 @@
-.PHONY: help dev-api dev-core dev-py dev-consumer dev-worker dev-congestion migrate-up
+.PHONY: help dev-api dev-core dev-py dev-consumer dev-worker dev-congestion dev-gateway dev-bridge migrate-up
 
 ENV ?= dev
 VERSION ?= dev
 
 API_PORT ?= 8080
 CORE_PORT ?= 8081
+GATEWAY_PORT ?= 8090
+BRIDGE_PORT ?= 8091
 PY_PORT ?= 8000
 PY_SERVICE ?= app
 
@@ -16,9 +18,11 @@ help:
 	@echo "  make dev-consumer (task.events consumer)"
 	@echo "  make dev-worker (outbox asynq worker)"
 	@echo "  make dev-congestion (congestion worker)"
+	@echo "  make dev-gateway (default ENV=dev PORT=$(GATEWAY_PORT))"
+	@echo "  make dev-bridge (default ENV=dev PORT=$(BRIDGE_PORT))"
 	@echo "  make migrate-up (uses DATABASE_URL)"
 	@echo ""
-	@echo "Override with: ENV=prod VERSION=... API_PORT=... CORE_PORT=... PY_PORT=... PY_SERVICE=..."
+	@echo "Override with: ENV=prod VERSION=... API_PORT=... CORE_PORT=... GATEWAY_PORT=... BRIDGE_PORT=... PY_PORT=... PY_SERVICE=..."
 
 dev-api:
 	@cd go && SERVICE_NAME=api ENV=$(ENV) PORT=$(API_PORT) VERSION=$(VERSION) go run ./api/cmd/api
@@ -37,6 +41,12 @@ dev-worker:
 
 dev-congestion:
 	@cd go && SERVICE_NAME=congestion-worker ENV=$(ENV) VERSION=$(VERSION) go run ./api/cmd/congestion-worker
+
+dev-gateway:
+	@cd go && SERVICE_NAME=gateway ENV=$(ENV) PORT=$(GATEWAY_PORT) VERSION=$(VERSION) go run ./gateway/cmd/gateway
+
+dev-bridge:
+	@cd go && SERVICE_NAME=bridge ENV=$(ENV) PORT=$(BRIDGE_PORT) VERSION=$(VERSION) go run ./gateway/cmd/bridge
 
 migrate-up:
 	@powershell -File scripts/migrate.ps1

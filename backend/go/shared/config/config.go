@@ -73,6 +73,12 @@ type Config struct {
 	OtelEndpoint          string
 	OtelInsecure          bool
 	OtelSampleRatio       float64
+	BridgeSourceBrokers   []string
+	BridgeTargetBrokers   []string
+	BridgeTopics          []string
+	BridgeGroupID         string
+	BridgeClientID        string
+	BridgeMaxBytes        int
 }
 
 func Load(serviceNameDefault string, httpPortDefault int) (Config, []Problem) {
@@ -132,6 +138,12 @@ func Load(serviceNameDefault string, httpPortDefault int) (Config, []Problem) {
 		OtelEndpoint:          "",
 		OtelInsecure:          true,
 		OtelSampleRatio:       1.0,
+		BridgeSourceBrokers:   nil,
+		BridgeTargetBrokers:   nil,
+		BridgeTopics:          nil,
+		BridgeGroupID:         "",
+		BridgeClientID:        "",
+		BridgeMaxBytes:        10e6,
 	}
 
 	problems := make([]Problem, 0, 4)
@@ -252,6 +264,10 @@ func Load(serviceNameDefault string, httpPortDefault int) (Config, []Problem) {
 	if cfg.OtelSampleRatio < 0 || cfg.OtelSampleRatio > 1 {
 		problems = append(problems, Problem{Field: "OTEL_SAMPLE_RATIO", Message: "OTEL_SAMPLE_RATIO must be 0-1"})
 		cfg.OtelSampleRatio = 1.0
+	}
+	if cfg.BridgeMaxBytes <= 0 {
+		problems = append(problems, Problem{Field: "BRIDGE_MAX_BYTES", Message: "BRIDGE_MAX_BYTES must be > 0"})
+		cfg.BridgeMaxBytes = 10e6
 	}
 
 	return cfg, problems
@@ -594,6 +610,28 @@ func applyEnv(cfg *Config, problems *[]Problem) {
 			cfg.OtelSampleRatio = f
 		}
 	}
+	if v := strings.TrimSpace(os.Getenv("BRIDGE_SOURCE_BROKERS")); v != "" {
+		cfg.BridgeSourceBrokers = parseCSV(v)
+	}
+	if v := strings.TrimSpace(os.Getenv("BRIDGE_TARGET_BROKERS")); v != "" {
+		cfg.BridgeTargetBrokers = parseCSV(v)
+	}
+	if v := strings.TrimSpace(os.Getenv("BRIDGE_TOPICS")); v != "" {
+		cfg.BridgeTopics = parseCSV(v)
+	}
+	if v := strings.TrimSpace(os.Getenv("BRIDGE_GROUP_ID")); v != "" {
+		cfg.BridgeGroupID = v
+	}
+	if v := strings.TrimSpace(os.Getenv("BRIDGE_CLIENT_ID")); v != "" {
+		cfg.BridgeClientID = v
+	}
+	if v := strings.TrimSpace(os.Getenv("BRIDGE_MAX_BYTES")); v != "" {
+		if n, err := strconv.Atoi(v); err != nil {
+			*problems = append(*problems, Problem{Field: "BRIDGE_MAX_BYTES", Message: "BRIDGE_MAX_BYTES must be an integer"})
+		} else {
+			cfg.BridgeMaxBytes = n
+		}
+	}
 }
 
 func applyConfigMap(cfg *Config, raw map[string]any, problems *[]Problem) {
@@ -928,6 +966,39 @@ func applyConfigMap(cfg *Config, raw map[string]any, problems *[]Problem) {
 				cfg.OtelSampleRatio = f
 			} else {
 				*problems = append(*problems, Problem{Field: "OTEL_SAMPLE_RATIO", Message: "OTEL_SAMPLE_RATIO must be a number"})
+			}
+		case "BRIDGE_SOURCE_BROKERS":
+			if s, ok := v.(string); ok {
+				cfg.BridgeSourceBrokers = parseCSV(s)
+			} else if arr, ok := v.([]any); ok {
+				cfg.BridgeSourceBrokers = parseAnyCSV(arr)
+			}
+		case "BRIDGE_TARGET_BROKERS":
+			if s, ok := v.(string); ok {
+				cfg.BridgeTargetBrokers = parseCSV(s)
+			} else if arr, ok := v.([]any); ok {
+				cfg.BridgeTargetBrokers = parseAnyCSV(arr)
+			}
+		case "BRIDGE_TOPICS":
+			if s, ok := v.(string); ok {
+				cfg.BridgeTopics = parseCSV(s)
+			} else if arr, ok := v.([]any); ok {
+				cfg.BridgeTopics = parseAnyCSV(arr)
+			}
+		case "BRIDGE_GROUP_ID":
+			if s, ok := v.(string); ok {
+				cfg.BridgeGroupID = strings.TrimSpace(s)
+			}
+		case "BRIDGE_CLIENT_ID":
+			if s, ok := v.(string); ok {
+				cfg.BridgeClientID = strings.TrimSpace(s)
+			}
+		case "BRIDGE_MAX_BYTES":
+			sec, ok := asInt(v)
+			if !ok {
+				*problems = append(*problems, Problem{Field: "BRIDGE_MAX_BYTES", Message: "BRIDGE_MAX_BYTES must be an integer"})
+			} else {
+				cfg.BridgeMaxBytes = sec
 			}
 		}
 	}

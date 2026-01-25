@@ -1,6 +1,6 @@
 param(
   [Parameter(Mandatory = $true)]
-  [ValidateSet("api", "core", "py", "consumer", "worker", "congestion")]
+  [ValidateSet("api", "core", "py", "consumer", "worker", "congestion", "gateway", "bridge")]
   [string]$Target,
 
   [string]$Env = "dev",
@@ -8,6 +8,8 @@ param(
 
   [int]$ApiPort = 8080,
   [int]$CorePort = 8081,
+  [int]$GatewayPort = 8090,
+  [int]$BridgePort = 8091,
   [int]$PyPort = 8000,
   [string]$PyService = "app"
 )
@@ -89,6 +91,32 @@ function Invoke-DevCongestion {
   }
 }
 
+function Invoke-DevGateway {
+  $env:SERVICE_NAME = "gateway"
+  $env:ENV = $Env
+  $env:PORT = "$GatewayPort"
+  $env:VERSION = $Version
+  Push-Location (Join-Path $PSScriptRoot "..\\go")
+  try {
+    go run .\\gateway\\cmd\\gateway
+  } finally {
+    Pop-Location
+  }
+}
+
+function Invoke-DevBridge {
+  $env:SERVICE_NAME = "bridge"
+  $env:ENV = $Env
+  $env:PORT = "$BridgePort"
+  $env:VERSION = $Version
+  Push-Location (Join-Path $PSScriptRoot "..\\go")
+  try {
+    go run .\\gateway\\cmd\\bridge
+  } finally {
+    Pop-Location
+  }
+}
+
 switch ($Target) {
   "api" { Invoke-DevApi }
   "core" { Invoke-DevCore }
@@ -96,4 +124,6 @@ switch ($Target) {
   "consumer" { Invoke-DevConsumer }
   "worker" { Invoke-DevWorker }
   "congestion" { Invoke-DevCongestion }
+  "gateway" { Invoke-DevGateway }
+  "bridge" { Invoke-DevBridge }
 }
